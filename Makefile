@@ -2,8 +2,8 @@ CC := gcc
 CFLAGS := -Wall -Wextra -Werror -O3 -march=native
 LDFLAGS := -flto
 
-SRC := src/
-BUILD := build/
+SRC := src
+BUILD := build
 BIN := main
 
 C_SRC_FILES := $(wildcard $(SRC)/*.c)
@@ -18,7 +18,7 @@ $(C_OBJ_FILES): $(BUILD)/%.o: $(SRC)/%.c
 
 .PHONY: bench clean
 bench: $(BIN)
-	hyperfine './$(BIN) data/positions.xyz' './$(BIN) data/positions_large.xyz'
+	hyperfine -m 20 './$(BIN) data/positions.xyz' './$(BIN) data/positions_large.xyz'
 
 clean:
 	rm -rf $(BUILD)
