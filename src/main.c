@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include "kd.h"
 
 int main(int argc, char **argv){
   if (argc < 2){
@@ -28,19 +29,14 @@ int main(int argc, char **argv){
   }
   fclose(fp);
 
+  KDTree *kd = kd_create(data, used);
   long count = 0;
-  for (long i=used-1; i>=0; i-=3){
-    for (long j=i-3; j>=0; j-=3){
-      float dx = data[j] - data[i];
-      float dy = data[j-1] - data[i-1];
-      float dz = data[j-2] - data[i-2];
-      if (dx * dx + dy * dy + dz * dz <= 0.05 * 0.05) {
-        count += 1;
-      }
-    }
+  for (long i=used-3; i>=0; i-=3){
+    count += kd_count_neighbours_traverse(0.05*0.05, &data[i], kd, 0);
   }
+  count -= used/3;
+  count /= 2;
   printf("Count = %ld\n", count);
-
   free(data);
   return 0;
 }
