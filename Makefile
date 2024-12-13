@@ -1,6 +1,6 @@
 CC := gcc
-CFLAGS := -Wall -Wextra -Werror -O3 -march=native
-LDFLAGS := -flto
+CFLAGS := -Wall -Wextra -Werror -O3 -march=native -fopenmp
+LDFLAGS := -flto -fopenmp
 
 SRC := src
 BUILD := build

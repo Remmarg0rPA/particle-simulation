@@ -1,8 +1,10 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <omp.h>
+#include <stdatomic.h>
 #include "kd.h"
 
-#define TIMER
+/* #define TIMER */
 #ifdef TIMER
 #include <sys/time.h>
 struct timeval stop, start;
@@ -54,7 +56,8 @@ int main(int argc, char **argv){
   STOP_TIMER("KD create")
 
   START_TIMER()
-  long count = 0;
+  atomic_long count = 0;
+  #pragma omp parallel for
   for (long i=used-3; i>=0; i-=3){
     count += kd_count_neighbours_traverse(0.05*0.05, &data[i], kd, 0);
   }

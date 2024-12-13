@@ -15,24 +15,37 @@ KDTree *kd_create(float *pts, int len){
 /*
   Insert a point into a KD tree without rebalancing
  */
-KDTree *kd_insert(struct KDTree *kdtree, float pt[3], int depth)
-{
-  if (kdtree == NULL){
-    kdtree = malloc(sizeof(KDTree));
-    kdtree->point[0] = pt[0];
-    kdtree->point[1] = pt[1];
-    kdtree->point[2] = pt[2];
-    kdtree->left = NULL;
-    kdtree->right = NULL;
-    return kdtree;
+KDTree *kd_insert(struct KDTree *root, float pt[3], int axis){
+  // The node to be appended to the tree
+  KDTree *leaf = malloc(sizeof(KDTree));
+  leaf->point[0] = pt[0];
+  leaf->point[1] = pt[1];
+  leaf->point[2] = pt[2];
+  leaf->left = NULL;
+  leaf->right = NULL;
+  if (root == NULL){
+    return leaf;
   }
-  int axis = depth % 3;
-  if (pt[axis] < kdtree->point[axis]){
-    kdtree->left = kd_insert(kdtree->left, pt, axis+1);
-  } else{
-    kdtree->right = kd_insert(kdtree->right, pt, axis+1);
+  
+  KDTree *kd = root;
+  while (1){
+    if (pt[axis] < kd->point[axis]){
+      if (kd->left != NULL){
+        kd = kd->left;
+      } else {
+        kd->left = leaf;
+        return root;
+      }
+    } else{
+      if (kd->right != NULL){
+        kd = kd->right;
+      } else {
+        kd->right = leaf;
+        return root;
+      }
+    }
+    axis = (axis+1)%3;
   }
-  return kdtree;
 }
 
 void kd_free(struct KDTree *kdtree){
