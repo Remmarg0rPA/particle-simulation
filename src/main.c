@@ -29,11 +29,11 @@ int main(int argc, char **argv){
   fclose(fp);
 
   long count = 0;
-  for (long i=used-1; i>=0; i-=3){
+  for (long i=used-3; i>=0; i-=3){
     for (long j=i-3; j>=0; j-=3){
       float dx = data[j] - data[i];
-      float dy = data[j-1] - data[i-1];
-      float dz = data[j-2] - data[i-2];
+      float dy = data[j+1] - data[i+1];
+      float dz = data[j+2] - data[i+2];
       if (dx * dx + dy * dy + dz * dz <= 0.05 * 0.05) {
         count += 1;
       }
