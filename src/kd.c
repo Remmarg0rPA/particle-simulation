@@ -98,7 +98,7 @@ int kd_count_neighbours_traverse(float range2, float point[3], KDTree *kdtree, i
   axis = axis %3;
   if (kdtree != NULL) {
     // Check distance to current point
-    count += DIST2(point, kdtree->point)<=range2 ? 1 : 0;
+    count += dist2(point, kdtree->point)<=range2 ? 1 : 0;
 
     // Could exist close points in both subtrees
     if ((point[axis]-kdtree->point[axis])*(point[axis]-kdtree->point[axis]) <= range2){
