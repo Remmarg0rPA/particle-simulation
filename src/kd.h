@@ -14,8 +14,9 @@ typedef struct KDTree {
 
 KDTree *kd_create(float *pts, int len);
 KDTree *kd_insert(struct KDTree *kdtree, float pt[3], int depth);
-int kd_count_neighbours_traverse(float range, float point[3], KDTree *kdtree, int depth);
+int kd_count_neighbours_traverse(float range2, float point[3], KDTree *kdtree, int axis);
 void kd_free(struct KDTree *kdtree);
 int kd_size(struct KDTree *kdtree);
+int kd_max_depth(struct KDTree *kdtree);
 
 #endif

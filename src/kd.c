@@ -48,6 +48,9 @@ KDTree *kd_insert(struct KDTree *root, float pt[3], int axis){
   }
 }
 
+/*
+  Free a KD tree from memory
+ */
 void kd_free(struct KDTree *kdtree){
   if (kdtree != NULL){
     KDTree *left = kdtree->left;
@@ -58,6 +61,9 @@ void kd_free(struct KDTree *kdtree){
   }
 }
 
+/*
+  Counts the number of nodes in a KD tree
+ */
 int kd_size(struct KDTree *kdtree){
   int count = 0;
   if (kdtree != NULL){
@@ -69,35 +75,16 @@ int kd_size(struct KDTree *kdtree){
 }
 
 /*
-Find nearest neighbour of given point.
+  Counts the max depth of a KD tree
  */
-KDTree *kd_nearest_neighbour(KDTree *kdtree, float pt[3], int depth, KDTree *best, float best_dist2){
-  if (kdtree == NULL) {
-    return NULL;
-  }
-  int axis = depth % 3;
-
-  // 1D distance to point
-  float dist2 = (kdtree->point[axis]-pt[axis])*(kdtree->point[axis]-pt[axis]);
-  if (dist2 >= best_dist2){
-    return NULL;
-  }
-
-  // Euclidian distance squared between the points
-  dist2 = DIST2(pt, kdtree->point);
-  if (dist2 < best_dist2){
-    best = kdtree;
-    best_dist2 = dist2;
-  }
-  // Check recursively
-  if (pt[axis] <= kdtree->point[axis]){
-    kd_nearest_neighbour(kdtree->left, pt, axis+1, best, best_dist2);
-    kd_nearest_neighbour(kdtree->right, pt, axis+1, best, best_dist2);
+int kd_max_depth(struct KDTree *kdtree){
+  if (kdtree == NULL){
+    return 0;
   } else {
-    kd_nearest_neighbour(kdtree->right, pt, axis+1, best, best_dist2);
-    kd_nearest_neighbour(kdtree->left, pt, axis+1, best, best_dist2);
+    int d1 = kd_max_depth(kdtree->left);
+    int d2 = kd_max_depth(kdtree->right);
+    return 1 + (d1 > d2 ? d1 : d2);
   }
-  return best;
 }
 
 /*
@@ -106,9 +93,9 @@ KDTree *kd_nearest_neighbour(KDTree *kdtree, float pt[3], int depth, KDTree *bes
   NOTE: Will always count a point paired with itself as within
   the range and will count each pair of distinct points twice.
  */
-int kd_count_neighbours_traverse(float range2, float point[3], KDTree *kdtree, int depth){
+int kd_count_neighbours_traverse(float range2, float point[3], KDTree *kdtree, int axis){
   int count = 0;
-  int axis = depth % 3;
+  axis = axis %3;
   if (kdtree != NULL) {
     // Check distance to current point
     count += DIST2(point, kdtree->point)<=range2 ? 1 : 0;
