@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <omp.h>
 #include <stdatomic.h>
 #include "kd.h"
@@ -16,6 +17,42 @@ struct timeval stop, start;
 #define STOP_TIMER(name)
 
 #endif
+
+/*
+  Parses 3 floats.
+  NOTE: Assumes that the first char is the start of the float
+  and that they are separated by only 1 whitespace.
+ */
+static inline void parse_line(char *str, float *data) {
+  char *end = NULL;
+  #pragma GCC unroll 3
+  for (int i=0; i<3; i++){
+    *data = strtof(str, &end);
+    str = end+1;
+    data++;
+  }
+}
+
+
+/*
+  Parse floats into the data buffer with size bytes from fp.
+  Returns number of floats read.
+ */
+size_t parse(FILE *fp, float *data, size_t size){
+  size_t buf_size = 0x100;
+  char *buf = malloc(buf_size);
+  size_t used = 0;
+  ssize_t n = 0;
+  while (0 < (n=getline(&buf, &buf_size, fp))){
+    parse_line(buf, &data[used]);
+    used += 3;
+  }
+  if (sizeof(float)*used >= size){
+    perror("parser overflow");
+    exit(-1);
+  }
+  return used;
+}
 
 int main(int argc, char **argv){
   if (argc < 2){
@@ -40,14 +77,15 @@ int main(int argc, char **argv){
   // This will be a small overestimation of needed space for positions.xyz,
   // and a large for positions_large.xyz
   float *data = malloc(size);
+  if (data == NULL){
+    perror("malloc");
+    return -1;
+  }
   STOP_TIMER("malloc")
 
   START_TIMER()
-  // NOTE: does not properly check for fail in fscanf or overflow of data
-  long used = 0;
-  while (3 == fscanf(fp, "%f %f %f", &data[used], &data[used+1], &data[used+2])){
-    used += 3;
-  }
+  // NOTE: does not check for overflow of data
+  long used = parse(fp, data, size);
   fclose(fp);
   STOP_TIMER("parsing")
 
@@ -65,7 +103,7 @@ int main(int argc, char **argv){
   count /= 2;
   STOP_TIMER("count")
 
-  printf("Count = %ld\n", count);
+  printf("%ld\n", count);  
   free(data);
   return 0;
 }
