@@ -54,6 +54,98 @@ size_t parse(FILE *fp, float *data, size_t size){
   return used;
 }
 
+#define BBSIZE 0.1
+#define NBB (int)((10-(-10))/BBSIZE+1 + 2)
+#define INDEX(i,j,k) ((i)*NBB*NBB + (j)*NBB + (k))
+
+typedef struct LinkedList {
+  float *pt;
+  struct LinkedList *next;
+} LinkedList;
+
+static inline LinkedList *insert_new(float *pt, LinkedList *head){
+  LinkedList *node = malloc(sizeof(LinkedList));
+  if (node == NULL){
+    perror("malloc");
+    exit(-1);
+  }
+  node->pt = pt;
+  node->next = head;
+  return node;
+}
+
+void insert_into_grid(LinkedList **grid, float *data, int used){
+  for (long i=0; i<used; i+=3){
+    float *pt = &data[i];
+    // All given floats are between ±10, therefore no bounding checks are performed
+    int x = (int)((pt[0] - (-10.))/BBSIZE);
+    int y = (int)((pt[1] - (-10.))/BBSIZE);
+    int z = (int)((pt[2] - (-10.))/BBSIZE);
+    grid[INDEX(x,y,z)] = insert_new(pt, grid[INDEX(x,y,z)]);
+  }
+}
+
+int compare(float *pt, LinkedList *head){
+  int count = 0;
+  while (head != NULL){
+    if (dist2(pt, head->pt) <= 0.05*0.05){
+      count += 1;
+    }
+    head = head->next;
+  }
+  return count;
+}
+
+long do_count(LinkedList **grid){
+  atomic_long count = 0;
+  #pragma omp parallel for
+  for (int i=0; i<NBB; i++){
+    for (int j=0; j<NBB; j++){
+      for (int k=0; k<NBB; k++){
+        LinkedList *head = grid[INDEX(i,j,k)];
+        while (head!=NULL){
+          /* printf("%i,%i,%i\n", i, j, k); */
+          float *cur = head->pt;
+          head = head->next;
+          count += compare(cur, head);
+          // Check neighbouring cells
+          if (i != NBB-1)
+            count += compare(cur, grid[INDEX(i+1, j, k)]);
+          if (j != NBB-1)
+            count += compare(cur, grid[INDEX(i, j+1, k)]);
+          if (k != NBB-1)
+            count += compare(cur, grid[INDEX(i, j, k+1)]);
+          if (i != NBB-1 && j != NBB-1)
+            count += compare(cur, grid[INDEX(i+1, j+1, k)]);
+          if (i != NBB-1 && k != NBB-1)
+            count += compare(cur, grid[INDEX(i+1, j, k+1)]);
+          if (j != NBB-1 && k != NBB-1)
+            count += compare(cur, grid[INDEX(i, j+1, k+1)]);
+          if (i != NBB-1 && j != NBB-1 && k != NBB-1)
+            count += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
+
+          if (i != NBB-1 && j != 0)
+            count += compare(cur, grid[INDEX(i+1, j-1, k)]);
+          if (i != NBB-1 && j != 0 && k != NBB-1)
+            count += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
+          if (i != NBB-1 &&  k != 0)
+            count += compare(cur, grid[INDEX(i+1, j, k-1)]);
+
+          if (i != NBB-1 && j != NBB-1 && k != 0)
+            count += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
+          if (i != NBB-1 && j != 0 && k != 0)
+            count += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
+
+          if (j != NBB-1 && k != 0)
+            count += compare(cur, grid[INDEX(i, j+1, k-1)]);
+            
+        }
+      }
+    }
+  }
+  return count;
+}
+
 int main(int argc, char **argv){
   if (argc < 2){
     printf("Usage: %s <data file>", argv[0]);
@@ -90,20 +182,22 @@ int main(int argc, char **argv){
   STOP_TIMER("parsing")
 
   START_TIMER()
-  KDTree *kd = kd_create(data, used);
-  STOP_TIMER("KD create")
+  LinkedList **grid = calloc(NBB*NBB*NBB, sizeof(LinkedList *));
+  if (grid == NULL){
+    perror("calloc");
+    return -1;
+  }
+  STOP_TIMER("calloc")
 
   START_TIMER()
-  atomic_long count = 0;
-  #pragma omp parallel for
-  for (long i=used-3; i>=0; i-=3){
-    count += kd_count_neighbours_traverse(0.05*0.05, &data[i], kd, 0);
-  }
-  count -= used/3;
-  count /= 2;
+  insert_into_grid(grid, data, used);
+  STOP_TIMER("insertion")
+
+  START_TIMER()
+  long count = do_count(grid);
   STOP_TIMER("count")
 
-  printf("%ld\n", count);  
+  printf("%ld\n", count);
   free(data);
   return 0;
 }
