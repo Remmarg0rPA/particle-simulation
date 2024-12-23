@@ -104,41 +104,45 @@ long do_count(LinkedList **grid){
       for (int k=0; k<NBB; k++){
         LinkedList *head = grid[INDEX(i,j,k)];
         while (head!=NULL){
-          /* printf("%i,%i,%i\n", i, j, k); */
           float *cur = head->pt;
           head = head->next;
           count += compare(cur, head);
+
           // Check neighbouring cells
-          if (i != NBB-1)
+          if (i != NBB-1){
             count += compare(cur, grid[INDEX(i+1, j, k)]);
-          if (j != NBB-1)
+            if (j != NBB-1){
+              count += compare(cur, grid[INDEX(i+1, j+1, k)]);
+              if (k != NBB-1)
+                count += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
+              if (k != 0)
+                count += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
+            }
+
+            if (j != 0){
+              count += compare(cur, grid[INDEX(i+1, j-1, k)]);
+              if (k != NBB-1)
+                count += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
+              if (k != 0)
+                count += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
+            }
+
+            if ( k != 0)
+              count += compare(cur, grid[INDEX(i+1, j, k-1)]);
+            if (k != NBB-1)
+              count += compare(cur, grid[INDEX(i+1, j, k+1)]);
+          }
+
+          if (j != NBB-1){
             count += compare(cur, grid[INDEX(i, j+1, k)]);
+            if (k != NBB-1)
+              count += compare(cur, grid[INDEX(i, j+1, k+1)]);
+            if (k != 0)
+              count += compare(cur, grid[INDEX(i, j+1, k-1)]);
+          }
+
           if (k != NBB-1)
             count += compare(cur, grid[INDEX(i, j, k+1)]);
-          if (i != NBB-1 && j != NBB-1)
-            count += compare(cur, grid[INDEX(i+1, j+1, k)]);
-          if (i != NBB-1 && k != NBB-1)
-            count += compare(cur, grid[INDEX(i+1, j, k+1)]);
-          if (j != NBB-1 && k != NBB-1)
-            count += compare(cur, grid[INDEX(i, j+1, k+1)]);
-          if (i != NBB-1 && j != NBB-1 && k != NBB-1)
-            count += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
-
-          if (i != NBB-1 && j != 0)
-            count += compare(cur, grid[INDEX(i+1, j-1, k)]);
-          if (i != NBB-1 && j != 0 && k != NBB-1)
-            count += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
-          if (i != NBB-1 &&  k != 0)
-            count += compare(cur, grid[INDEX(i+1, j, k-1)]);
-
-          if (i != NBB-1 && j != NBB-1 && k != 0)
-            count += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
-          if (i != NBB-1 && j != 0 && k != 0)
-            count += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
-
-          if (j != NBB-1 && k != 0)
-            count += compare(cur, grid[INDEX(i, j+1, k-1)]);
-            
         }
       }
     }
