@@ -98,10 +98,40 @@ int compare(float *pt, LinkedList *head){
 
 long do_count(LinkedList **grid){
   atomic_long count = 0;
+  // Check neighbouring internal cells. Boundary cells are checked below
   #pragma omp parallel for
-  for (int i=0; i<NBB; i++){
-    for (int j=0; j<NBB; j++){
-      for (int k=0; k<NBB; k++){
+  for (int i=1; i<NBB-1; i++){
+    for (int j=1; j<NBB-1; j++){
+      for (int k=1; k<NBB-1; k++){
+        LinkedList *head = grid[INDEX(i,j,k)];
+        while (head!=NULL){
+          float *cur = head->pt;
+          head = head->next;
+          count += compare(cur, head);
+
+          // Check neighbouring cells
+          count += compare(cur, grid[INDEX(i+1, j, k)]);
+          count += compare(cur, grid[INDEX(i+1, j+1, k)]);
+          count += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
+          count += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
+          count += compare(cur, grid[INDEX(i+1, j-1, k)]);
+          count += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
+          count += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
+          count += compare(cur, grid[INDEX(i+1, j, k-1)]);
+          count += compare(cur, grid[INDEX(i+1, j, k+1)]);
+          count += compare(cur, grid[INDEX(i, j+1, k)]);
+          count += compare(cur, grid[INDEX(i, j+1, k+1)]);
+          count += compare(cur, grid[INDEX(i, j+1, k-1)]);
+          count += compare(cur, grid[INDEX(i, j, k+1)]);
+        }
+      }
+    }
+  }
+
+  // Check boundaries
+  for (int i=0; i<NBB; i+=NBB-1){
+    for (int j=0; j<NBB; j+=NBB-1){
+      for (int k=0; k<NBB; k+=NBB-1){
         LinkedList *head = grid[INDEX(i,j,k)];
         while (head!=NULL){
           float *cur = head->pt;
