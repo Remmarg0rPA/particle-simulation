@@ -1,7 +1,9 @@
 data/
 build/
 .ccls-cache/
+ltximg/
 *.o
 main
 *.org
 *.ods
+callgrind.out.*
