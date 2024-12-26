@@ -1,10 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdbool.h>
-#include <omp.h>
-#include <stdatomic.h>
 #include <pthread.h>
-#include "kd.h"
 
 /* #define TIMER */
 #ifdef TIMER
@@ -18,6 +14,47 @@ struct timeval stop, start;
 #define STOP_TIMER(name)
 
 #endif
+
+#define BBSIZE 0.1
+#define NBB (int)((10-(-10))/BBSIZE+1 + 2)
+#define INDEX(i,j,k) ((i+1)*NBB*NBB + (j+1)*NBB + (k+1))
+
+typedef struct LinkedList {
+  float *pt;
+  struct LinkedList *next;
+} LinkedList;
+
+typedef struct parser_args {
+  FILE *fp;
+  pthread_mutex_t *mutex;
+  float *data;
+  volatile float *data_next_empty;
+  float *data_end;
+} parser_args;
+
+typedef struct counter_args {
+  LinkedList **grid;
+  int start_idx;
+  int end_idx;
+  int stride;
+  volatile long npairs;
+} counter_args;
+
+static inline float dist2(float *pt1, float *pt2){
+  /*
+    NOTE: Using the loop will yield incorrect, but almost identical code.
+    It will use one more `vfmadd132ss`, instead of a `vmulss`, resulting
+    in it counting one extra point pair.
+  */
+  /*
+  float sum = 0;
+  for (int i=0; i<3; i++){
+    sum += (pt1[i]-pt2[i])*(pt1[i]-pt2[i]);
+  }
+  return sum;
+  */
+  return ((pt1[0]-pt2[0])*(pt1[0]-pt2[0])) + ((pt1[1]-pt2[1])*(pt1[1]-pt2[1])) +((pt1[2]-pt2[2])*(pt1[2]-pt2[2]));
+}
 
 /*
   Parses 3 floats.
@@ -33,14 +70,6 @@ static inline void parse_line(char *str, float *data) {
     data++;
   }
 }
-
-typedef struct parser_args {
-  FILE *fp;
-  pthread_mutex_t *mutex;
-  float *data;
-  volatile float *data_next_empty;
-  float *data_end;
-} parser_args;
 
 void *parser_thread(void *__pargs){
   parser_args *pargs = (parser_args *)__pargs;
@@ -63,14 +92,13 @@ void *parser_thread(void *__pargs){
     pthread_mutex_unlock(mutex);
     parse_line(buf, data_ptr);
   }
-  free(buf);
   if (data_next >= data_end){
     perror("parser overflow");
     exit(-1);
   }
+  free(buf);
   return NULL;
 }
-
 
 /*
   Parse floats into the data buffer with size bytes from fp.
@@ -113,15 +141,6 @@ size_t parse(FILE *fp, float *data, size_t size){
   return pargs.data_next_empty - pargs.data;
 }
 
-#define BBSIZE 0.1
-#define NBB (int)((10-(-10))/BBSIZE+1 + 2)
-#define INDEX(i,j,k) ((i+1)*NBB*NBB + (j+1)*NBB + (k+1))
-
-typedef struct LinkedList {
-  float *pt;
-  struct LinkedList *next;
-} LinkedList;
-
 static inline LinkedList *insert_new(float *pt, LinkedList *head){
   LinkedList *node = malloc(sizeof(LinkedList));
   if (node == NULL){
@@ -154,14 +173,6 @@ int compare(float *pt, LinkedList *head){
   }
   return count;
 }
-
-typedef struct counter_args {
-  LinkedList **grid;
-  int start_idx;
-  int end_idx;
-  int stride;
-  volatile long npairs;
-} counter_args;
 
 void *counter_thread(void *__cargs){
   counter_args *cargs = (counter_args *)__cargs;
@@ -203,7 +214,7 @@ void *counter_thread(void *__cargs){
 }
 
 long count(LinkedList **grid){
-  const int nthreads = 4;
+  const int nthreads = 6;
   pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
   counter_args *cargs = malloc(nthreads*sizeof(counter_args));
   for (int i=0; i<nthreads; i++){
@@ -245,14 +256,11 @@ int main(int argc, char **argv){
     return -1;
   }
 
-  START_TIMER()
   // Get file size
   fseek(fp, 0, SEEK_END);
   long size = ftell(fp);
   fseek(fp, 0, SEEK_SET);
-  STOP_TIMER("filesize")
 
-  START_TIMER()
   // This will be a small overestimation of needed space for positions.xyz,
   // and a large for positions_large.xyz
   float *data = malloc(size);
@@ -260,29 +268,25 @@ int main(int argc, char **argv){
     perror("malloc");
     return -1;
   }
-  STOP_TIMER("malloc")
 
-  START_TIMER()
-  // NOTE: does not check for overflow of data
+  START_TIMER();
   long used = parse(fp, data, size);
   fclose(fp);
-  STOP_TIMER("parsing")
+  STOP_TIMER("parsing");
 
-  START_TIMER()
-    LinkedList **grid = calloc((NBB+1)*(NBB+1)*(NBB+1), sizeof(LinkedList *));
+  LinkedList **grid = calloc((NBB+1)*(NBB+1)*(NBB+1), sizeof(LinkedList *));
   if (grid == NULL){
     perror("calloc");
     return -1;
   }
-  STOP_TIMER("calloc")
 
-  START_TIMER()
+  START_TIMER();
   insert_into_grid(grid, data, used);
-  STOP_TIMER("insertion")
+  STOP_TIMER("insertion");
 
-  START_TIMER()
+  START_TIMER();
   long npairs = count(grid);
-  STOP_TIMER("count")
+  STOP_TIMER("count");
 
   printf("%ld\n", npairs);
   free(data);
