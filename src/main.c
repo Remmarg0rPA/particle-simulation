@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <omp.h>
 #include <stdatomic.h>
+#include <pthread.h>
 #include "kd.h"
 
 /* #define TIMER */
@@ -33,23 +34,80 @@ static inline void parse_line(char *str, float *data) {
   }
 }
 
+typedef struct parser_args {
+  FILE *fp;
+  pthread_mutex_t *mutex;
+  float *data;
+  volatile size_t *data_used;
+  size_t data_size;
+} parser_args;
+
+void *parser_thread(void *pargs){
+  FILE *fp = ((parser_args *)pargs)->fp;
+  float *data = ((parser_args *)pargs)->data;
+  pthread_mutex_t *mutex = ((parser_args *)pargs)->mutex;
+  volatile size_t *n_read_floats = ((parser_args *)pargs)->data_used;
+  size_t data_size = ((parser_args *)pargs)->data_size;
+
+  size_t buf_size = 0x100;
+  char *buf = malloc(buf_size);
+  float *data_ptr;
+  ssize_t n;
+  while (1){
+    pthread_mutex_lock(mutex);
+    if (0 >= (n=getline(&buf, &buf_size, fp))){
+      pthread_mutex_unlock(mutex);
+      if (sizeof(float)*(*n_read_floats) >= data_size){
+        perror("parser overflow");
+        exit(-1);
+      }
+      return NULL;
+    }
+    data_ptr = data + *n_read_floats;
+    *n_read_floats += 3;
+    pthread_mutex_unlock(mutex);
+    parse_line(buf, data_ptr);
+  }
+}
+
 
 /*
   Parse floats into the data buffer with size bytes from fp.
   Returns number of floats read.
  */
 size_t parse(FILE *fp, float *data, size_t size){
-  size_t buf_size = 0x100;
-  char *buf = malloc(buf_size);
-  size_t used = 0;
-  ssize_t n = 0;
-  while (0 < (n=getline(&buf, &buf_size, fp))){
-    parse_line(buf, &data[used]);
-    used += 3;
-  }
-  if (sizeof(float)*used >= size){
-    perror("parser overflow");
+  // Mutex used for reading from fp and read/write index `used`
+  pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+  if (pthread_mutex_init(&mutex, NULL) != 0) {
+    perror("mutex");
     exit(-1);
+  }
+
+  const int nthreads = 6;
+  pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
+  volatile size_t used = 0;
+  parser_args pargs = {
+    .fp = fp,
+    .mutex = &mutex,
+    .data = data,
+    .data_used = &used,
+    .data_size = size
+  };
+
+  // Create threads
+  for (int i=0; i<nthreads; i++){
+    if (0 != pthread_create(&threads[i], NULL, &parser_thread, &pargs)){
+      perror("pthread_create");
+      exit(-1);
+    }
+  }
+
+  // Join threads
+  for (int i=0; i<nthreads; i++){
+    if (0 != pthread_join(threads[i], NULL)){
+      perror("pthread_join");
+      exit(-1);
+    }
   }
   return used;
 }

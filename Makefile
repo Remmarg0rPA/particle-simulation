@@ -1,6 +1,6 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -Werror -O3 -march=native -fopenmp
-LDFLAGS := -flto -fopenmp
+LDFLAGS := -flto -fopenmp -lpthread
 
 SRC := src
 BUILD := build
@@ -18,7 +18,7 @@ $(C_OBJ_FILES): $(BUILD)/%.o: $(SRC)/%.c
 
 .PHONY: bench clean
 bench: $(BIN)
-	hyperfine -m 20 './$(BIN) data/positions.xyz' './$(BIN) data/positions_large.xyz'
+	hyperfine --min-runs 100 --warmup 25 --shell=none './$(BIN) data/positions.xyz' './$(BIN) data/positions_large.xyz'
 
 clean:
 	rm -rf $(BUILD)
