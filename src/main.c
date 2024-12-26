@@ -1,3 +1,4 @@
+#define  _POSIX_C_SOURCE 200809L
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -26,7 +27,6 @@ typedef struct LinkedList {
 
 typedef struct parser_args {
   FILE *fp;
-  pthread_mutex_t *mutex;
   float *data;
   volatile float *data_next_empty;
   float *data_end;
@@ -74,7 +74,6 @@ static inline void parse_line(char *str, float *data) {
 void *parser_thread(void *__pargs){
   parser_args *pargs = (parser_args *)__pargs;
   FILE *fp = pargs->fp;
-  pthread_mutex_t *mutex = pargs->mutex;
   float *data_next = (float *)pargs->data_next_empty;
   float *data_end = pargs->data_end;
 
@@ -82,14 +81,10 @@ void *parser_thread(void *__pargs){
   char *buf = malloc(buf_size);
   float *data_ptr;
   while (1){
-    pthread_mutex_lock(mutex);
     if (0 >= getline(&buf, &buf_size, fp)){
-      pthread_mutex_unlock(mutex);
       break;
     }
-    data_ptr = (float *)pargs->data_next_empty;
-    pargs->data_next_empty += 3;
-    pthread_mutex_unlock(mutex);
+    data_ptr = (float *)__atomic_fetch_add(&(pargs->data_next_empty), 3*sizeof(float), __ATOMIC_SEQ_CST);
     parse_line(buf, data_ptr);
   }
   if (data_next >= data_end){
@@ -105,18 +100,10 @@ void *parser_thread(void *__pargs){
   Returns number of floats read.
  */
 size_t parse(FILE *fp, float *data, size_t size){
-  // Mutex used for reading from fp and read/write index `used`
-  pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-  if (pthread_mutex_init(&mutex, NULL) != 0) {
-    perror("mutex");
-    exit(-1);
-  }
-
   const int nthreads = 6;
   pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
   parser_args pargs = {
     .fp = fp,
-    .mutex = &mutex,
     .data = data,
     .data_next_empty = data,
     .data_end = data+size

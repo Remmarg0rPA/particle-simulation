@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS := -Wall -Wextra -Werror -O3 -march=native -fopenmp
+CFLAGS := -Wall -Wextra -Werror -O3 -march=native -fopenmp -std=c11
 LDFLAGS := -flto -fopenmp -lpthread
 
 SRC := src
