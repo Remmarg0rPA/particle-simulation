@@ -109,12 +109,13 @@ size_t parse(FILE *fp, float *data, size_t size){
       exit(-1);
     }
   }
+  free(threads);
   return pargs.data_next_empty - pargs.data;
 }
 
 #define BBSIZE 0.1
 #define NBB (int)((10-(-10))/BBSIZE+1 + 2)
-#define INDEX(i,j,k) ((i)*NBB*NBB + (j)*NBB + (k))
+#define INDEX(i,j,k) ((i+1)*NBB*NBB + (j+1)*NBB + (k+1))
 
 typedef struct LinkedList {
   float *pt;
@@ -162,9 +163,6 @@ typedef struct counter_args {
   volatile long npairs;
 } counter_args;
 
-/*
-  NOTE: Only valid for counting internal cells and not the boundary cells.
-*/
 void *counter_thread(void *__cargs){
   counter_args *cargs = (counter_args *)__cargs;
   LinkedList **grid = cargs->grid;
@@ -174,8 +172,8 @@ void *counter_thread(void *__cargs){
   long npairs = 0;
   
   for (int i=sidx; i<eidx; i+=stride){
-    for (int j=1; j<NBB-1; j+=1){
-      for (int k=1; k<NBB-1; k+=1){
+    for (int j=0; j<NBB; j+=1){
+      for (int k=0; k<NBB; k+=1){
         LinkedList *head = grid[INDEX(i,j,k)];
         while (head!=NULL){
           float *cur = head->pt;
@@ -204,71 +202,14 @@ void *counter_thread(void *__cargs){
   return NULL;
 }
 
-void *count_boundary(void *__cargs){
-  counter_args *cargs = (counter_args *)__cargs;
-  LinkedList **grid = cargs->grid;
-  long npairs = 0;
-    // Check boundaries
-  for (int i=0; i<NBB; i+=NBB-1){
-    for (int j=0; j<NBB; j+=NBB-1){
-      for (int k=0; k<NBB; k+=NBB-1){
-        LinkedList *head = grid[INDEX(i,j,k)];
-        while (head!=NULL){
-          float *cur = head->pt;
-          head = head->next;
-          npairs += compare(cur, head);
-
-          // Check neighbouring cells
-          if (i != NBB-1){
-            npairs += compare(cur, grid[INDEX(i+1, j, k)]);
-            if (j != NBB-1){
-              npairs += compare(cur, grid[INDEX(i+1, j+1, k)]);
-              if (k != NBB-1)
-                npairs += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
-              if (k != 0)
-                npairs += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
-            }
-
-            if (j != 0){
-              npairs += compare(cur, grid[INDEX(i+1, j-1, k)]);
-              if (k != NBB-1)
-                npairs += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
-              if (k != 0)
-                npairs += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
-            }
-
-            if ( k != 0)
-              npairs += compare(cur, grid[INDEX(i+1, j, k-1)]);
-            if (k != NBB-1)
-              npairs += compare(cur, grid[INDEX(i+1, j, k+1)]);
-          }
-
-          if (j != NBB-1){
-            npairs += compare(cur, grid[INDEX(i, j+1, k)]);
-            if (k != NBB-1)
-              npairs += compare(cur, grid[INDEX(i, j+1, k+1)]);
-            if (k != 0)
-              npairs += compare(cur, grid[INDEX(i, j+1, k-1)]);
-          }
-
-          if (k != NBB-1)
-            npairs += compare(cur, grid[INDEX(i, j, k+1)]);
-        }
-      }
-    }
-  }
-  cargs->npairs = npairs;
-  return NULL;
-}
-
 long count(LinkedList **grid){
   const int nthreads = 4;
   pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
   counter_args *cargs = malloc(nthreads*sizeof(counter_args));
   for (int i=0; i<nthreads; i++){
     cargs[i].grid = grid;
-    cargs[i].start_idx = i+1;
-    cargs[i].end_idx = NBB-1;
+    cargs[i].start_idx = i;
+    cargs[i].end_idx = NBB;
     cargs[i].stride = nthreads;
   }
   // Create threads
@@ -278,12 +219,7 @@ long count(LinkedList **grid){
       exit(-1);
     }
   }
-  counter_args boundary_args = {
-    .grid = grid,
-  };
-  count_boundary((void *)&boundary_args);
-  long npairs = boundary_args.npairs;
-
+  long npairs = 0;
   // Join threads
   for (int i=0; i<nthreads; i++){
     if (0 != pthread_join(threads[i], NULL)){
@@ -292,6 +228,8 @@ long count(LinkedList **grid){
     }
     npairs += cargs[i].npairs;
   }
+  free(threads);
+  free(cargs);
   return npairs;
 }
 
@@ -331,7 +269,7 @@ int main(int argc, char **argv){
   STOP_TIMER("parsing")
 
   START_TIMER()
-  LinkedList **grid = calloc(NBB*NBB*NBB, sizeof(LinkedList *));
+    LinkedList **grid = calloc((NBB+1)*(NBB+1)*(NBB+1), sizeof(LinkedList *));
   if (grid == NULL){
     perror("calloc");
     return -1;
