@@ -18,7 +18,7 @@ $(C_OBJ_FILES): $(BUILD)/%.o: $(SRC)/%.c
 
 .PHONY: bench clean
 bench: $(BIN)
-	hyperfine --min-runs 100 --warmup 25 --shell=none './$(BIN) data/positions.xyz' './$(BIN) data/positions_large.xyz'
+	hyperfine --min-runs 100 --warmup 25 --shell=none './$(BIN) -f data/positions.xyz -c 4 -p 4' './$(BIN) -f data/positions_large.xyz -c 4 -p 4'
 
 clean:
 	rm -rf $(BUILD)

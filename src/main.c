@@ -40,6 +40,25 @@ typedef struct counter_args {
   volatile long npairs;
 } counter_args;
 
+typedef struct Config {
+  int n_parser_threads;
+  int n_count_threads;
+  char *file;
+} Config;
+
+Config config = {
+  .n_parser_threads = 4,
+  .n_count_threads = 4,
+  .file = NULL
+};
+
+void usage(char **argv){
+  printf("Usage: %s -f <data file> [-p NUM] [-c NUM]\n", argv[0]);
+  puts("\t-c Num\tNumber of threads to use while counting pairs. Default is 4.");
+  puts("\t-p Num\tNumber of threads to use while parsing. Default is 4.");
+  puts("\t-h\tPrint this message and exit.");
+}
+
 static inline float dist2(float *pt1, float *pt2){
   /*
     NOTE: Using the loop will yield incorrect, but almost identical code.
@@ -100,7 +119,7 @@ void *parser_thread(void *__pargs){
   Returns number of floats read.
  */
 size_t parse(FILE *fp, float *data, size_t size){
-  const int nthreads = 6;
+  const int nthreads = config.n_parser_threads;
   pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
   parser_args pargs = {
     .fp = fp,
@@ -201,7 +220,7 @@ void *counter_thread(void *__cargs){
 }
 
 long count(LinkedList **grid){
-  const int nthreads = 6;
+  const int nthreads = config.n_count_threads;
   pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
   counter_args *cargs = malloc(nthreads*sizeof(counter_args));
   for (int i=0; i<nthreads; i++){
@@ -232,12 +251,48 @@ long count(LinkedList **grid){
 }
 
 int main(int argc, char **argv){
-  if (argc < 2){
-    printf("Usage: %s <data file>", argv[0]);
-    return -1;
+  START_TIMER();
+  int i = 1;
+  while (i < argc) {
+    switch (argv[i][0]){
+    case '-':
+      switch (argv[i][1]){
+      case 'c':
+        i++;
+        if (0 >= (config.n_count_threads = atoi(argv[i]))){
+          perror("atoi");
+          return -1;
+        }
+        break;
+      case 'f':
+        i++;
+        config.file = argv[i];
+        break;
+      case 'h':
+        usage(argv);
+        return 0;
+      case 'p':
+        i++;
+        if (0 >= (config.n_parser_threads = atoi(argv[i]))){
+          perror("atoi");
+          return -1;
+        }
+        break;
+      default:
+        printf("Unrecognized option \"-%s\"\n", &argv[i][1]);
+        usage(argv);
+        return -1;
+      }
+      break;
+    default:
+      printf("Unrecognized option \"%s\"\n", argv[i]);
+      usage(argv);
+      return -1;
+    }
+    i++;
   }
 
-  FILE *fp = fopen(argv[1], "r");
+  FILE *fp = fopen(config.file, "r");
   if (fp == NULL){
     perror("fopen");
     return -1;
@@ -256,16 +311,17 @@ int main(int argc, char **argv){
     return -1;
   }
 
-  START_TIMER();
-  long used = parse(fp, data, size);
-  fclose(fp);
-  STOP_TIMER("parsing");
-
   LinkedList **grid = calloc((NBB+1)*(NBB+1)*(NBB+1), sizeof(LinkedList *));
   if (grid == NULL){
     perror("calloc");
     return -1;
   }
+  STOP_TIMER("init");
+
+  START_TIMER();
+  long used = parse(fp, data, size);
+  fclose(fp);
+  STOP_TIMER("parsing");
 
   START_TIMER();
   insert_into_grid(grid, data, used);
@@ -277,5 +333,6 @@ int main(int argc, char **argv){
 
   printf("%ld\n", npairs);
   free(data);
+  free(grid);
   return 0;
 }
