@@ -154,39 +154,61 @@ int compare(float *pt, LinkedList *head){
   return count;
 }
 
-long do_count(LinkedList **grid){
-  atomic_long count = 0;
-  // Check neighbouring internal cells. Boundary cells are checked below
-  #pragma omp parallel for
-  for (int i=1; i<NBB-1; i++){
-    for (int j=1; j<NBB-1; j++){
-      for (int k=1; k<NBB-1; k++){
+typedef struct counter_args {
+  LinkedList **grid;
+  int start_idx;
+  int end_idx;
+  int stride;
+  volatile long npairs;
+} counter_args;
+
+/*
+  NOTE: Only valid for counting internal cells and not the boundary cells.
+*/
+void *counter_thread(void *__cargs){
+  counter_args *cargs = (counter_args *)__cargs;
+  LinkedList **grid = cargs->grid;
+  int sidx = cargs->start_idx;
+  int eidx = cargs->end_idx;
+  int stride = cargs->stride;
+  long npairs = 0;
+  
+  for (int i=sidx; i<eidx; i+=stride){
+    for (int j=1; j<NBB-1; j+=1){
+      for (int k=1; k<NBB-1; k+=1){
         LinkedList *head = grid[INDEX(i,j,k)];
         while (head!=NULL){
           float *cur = head->pt;
           head = head->next;
-          count += compare(cur, head);
+          npairs += compare(cur, head);
 
           // Check neighbouring cells
-          count += compare(cur, grid[INDEX(i+1, j, k)]);
-          count += compare(cur, grid[INDEX(i+1, j+1, k)]);
-          count += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
-          count += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
-          count += compare(cur, grid[INDEX(i+1, j-1, k)]);
-          count += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
-          count += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
-          count += compare(cur, grid[INDEX(i+1, j, k-1)]);
-          count += compare(cur, grid[INDEX(i+1, j, k+1)]);
-          count += compare(cur, grid[INDEX(i, j+1, k)]);
-          count += compare(cur, grid[INDEX(i, j+1, k+1)]);
-          count += compare(cur, grid[INDEX(i, j+1, k-1)]);
-          count += compare(cur, grid[INDEX(i, j, k+1)]);
+          npairs += compare(cur, grid[INDEX(i+1, j, k)]);
+          npairs += compare(cur, grid[INDEX(i+1, j+1, k)]);
+          npairs += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
+          npairs += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
+          npairs += compare(cur, grid[INDEX(i+1, j-1, k)]);
+          npairs += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
+          npairs += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
+          npairs += compare(cur, grid[INDEX(i+1, j, k-1)]);
+          npairs += compare(cur, grid[INDEX(i+1, j, k+1)]);
+          npairs += compare(cur, grid[INDEX(i, j+1, k)]);
+          npairs += compare(cur, grid[INDEX(i, j+1, k+1)]);
+          npairs += compare(cur, grid[INDEX(i, j+1, k-1)]);
+          npairs += compare(cur, grid[INDEX(i, j, k+1)]);
         }
       }
     }
   }
+  cargs->npairs = npairs;
+  return NULL;
+}
 
-  // Check boundaries
+void *count_boundary(void *__cargs){
+  counter_args *cargs = (counter_args *)__cargs;
+  LinkedList **grid = cargs->grid;
+  long npairs = 0;
+    // Check boundaries
   for (int i=0; i<NBB; i+=NBB-1){
     for (int j=0; j<NBB; j+=NBB-1){
       for (int k=0; k<NBB; k+=NBB-1){
@@ -194,48 +216,83 @@ long do_count(LinkedList **grid){
         while (head!=NULL){
           float *cur = head->pt;
           head = head->next;
-          count += compare(cur, head);
+          npairs += compare(cur, head);
 
           // Check neighbouring cells
           if (i != NBB-1){
-            count += compare(cur, grid[INDEX(i+1, j, k)]);
+            npairs += compare(cur, grid[INDEX(i+1, j, k)]);
             if (j != NBB-1){
-              count += compare(cur, grid[INDEX(i+1, j+1, k)]);
+              npairs += compare(cur, grid[INDEX(i+1, j+1, k)]);
               if (k != NBB-1)
-                count += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
+                npairs += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
               if (k != 0)
-                count += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
+                npairs += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
             }
 
             if (j != 0){
-              count += compare(cur, grid[INDEX(i+1, j-1, k)]);
+              npairs += compare(cur, grid[INDEX(i+1, j-1, k)]);
               if (k != NBB-1)
-                count += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
+                npairs += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
               if (k != 0)
-                count += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
+                npairs += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
             }
 
             if ( k != 0)
-              count += compare(cur, grid[INDEX(i+1, j, k-1)]);
+              npairs += compare(cur, grid[INDEX(i+1, j, k-1)]);
             if (k != NBB-1)
-              count += compare(cur, grid[INDEX(i+1, j, k+1)]);
+              npairs += compare(cur, grid[INDEX(i+1, j, k+1)]);
           }
 
           if (j != NBB-1){
-            count += compare(cur, grid[INDEX(i, j+1, k)]);
+            npairs += compare(cur, grid[INDEX(i, j+1, k)]);
             if (k != NBB-1)
-              count += compare(cur, grid[INDEX(i, j+1, k+1)]);
+              npairs += compare(cur, grid[INDEX(i, j+1, k+1)]);
             if (k != 0)
-              count += compare(cur, grid[INDEX(i, j+1, k-1)]);
+              npairs += compare(cur, grid[INDEX(i, j+1, k-1)]);
           }
 
           if (k != NBB-1)
-            count += compare(cur, grid[INDEX(i, j, k+1)]);
+            npairs += compare(cur, grid[INDEX(i, j, k+1)]);
         }
       }
     }
   }
-  return count;
+  cargs->npairs = npairs;
+  return NULL;
+}
+
+long count(LinkedList **grid){
+  const int nthreads = 4;
+  pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
+  counter_args *cargs = malloc(nthreads*sizeof(counter_args));
+  for (int i=0; i<nthreads; i++){
+    cargs[i].grid = grid;
+    cargs[i].start_idx = i+1;
+    cargs[i].end_idx = NBB-1;
+    cargs[i].stride = nthreads;
+  }
+  // Create threads
+  for (int i=0; i<nthreads; i++){
+    if (0 != pthread_create(&threads[i], NULL, &counter_thread, &cargs[i])){
+      perror("pthread_create");
+      exit(-1);
+    }
+  }
+  counter_args boundary_args = {
+    .grid = grid,
+  };
+  count_boundary((void *)&boundary_args);
+  long npairs = boundary_args.npairs;
+
+  // Join threads
+  for (int i=0; i<nthreads; i++){
+    if (0 != pthread_join(threads[i], NULL)){
+      perror("pthread_join");
+      exit(-1);
+    }
+    npairs += cargs[i].npairs;
+  }
+  return npairs;
 }
 
 int main(int argc, char **argv){
@@ -286,10 +343,10 @@ int main(int argc, char **argv){
   STOP_TIMER("insertion")
 
   START_TIMER()
-  long count = do_count(grid);
+  long npairs = count(grid);
   STOP_TIMER("count")
 
-  printf("%ld\n", count);
+  printf("%ld\n", npairs);
   free(data);
   return 0;
 }
