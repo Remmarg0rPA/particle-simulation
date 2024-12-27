@@ -50,10 +50,27 @@ typedef struct Config {
   char *file;
 } Config;
 
+typedef struct parser_state {
+  int nthreads;
+  pthread_t *threads;
+  parser_args *threads_args;
+  volatile float *data_next_empty;
+  volatile int n_running;
+} parser_state;
+
+
 Config config = {
   .n_parser_threads = 4,
   .n_count_threads = 4,
   .file = NULL
+};
+
+parser_state pstate = {
+  .nthreads = 4,
+  .threads = NULL,
+  .threads_args = NULL,
+  .data_next_empty = NULL,
+  .n_running = 0,
 };
 
 void usage(char **argv){
@@ -96,6 +113,7 @@ static inline char *parse_line(char *str, float *data) {
 }
 
 void *parser_thread(void *__pargs){
+  pstate.n_running += 1;
   parser_args *pargs = (parser_args *)__pargs;
   char *str = pargs->file_start;
   float *data_ptr = NULL;
@@ -104,55 +122,59 @@ void *parser_thread(void *__pargs){
     str = parse_line(str, data_ptr);
   }
   if (data_ptr >= pargs->data_end){
+    pstate.n_running -= 1;
     perror("parser overflow");
     exit(-1);
   }
+  pstate.n_running -= 1;
   return NULL;
 }
 
-/*
-  Parse floats into the data buffer with size bytes from fp.
-  Returns number of floats read.
- */
-size_t parse(char *file, float *data, size_t size){
-  const int nthreads = config.n_parser_threads;
-  pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
-  parser_args *pargs = malloc(nthreads*sizeof(parser_args));
-  volatile float *data_next_empty = data;
+void start_parser(char *file, float *data, size_t size){
+  const int nthreads = pstate.nthreads;
+  pstate.threads = malloc(nthreads*sizeof(pthread_t));
+  pstate.threads_args = malloc(nthreads*sizeof(parser_args));
+  if (pstate.threads == NULL || pstate.threads_args == NULL){
+    perror("malloc");
+    exit(-1);
+  }
+  pstate.data_next_empty = data;
 
-  for (int i=0; i<nthreads; i++){
-    pargs[i].file_start = file + (size/nthreads)*i;
-    pargs[i].data_next_empty = &data_next_empty;
-    pargs[i].data_end = data+size;
+  // Init args to threads
+  pstate.threads_args[0].file_start = file;
+  pstate.threads_args[0].data_next_empty = &pstate.data_next_empty;
+  pstate.threads_args[0].data_end = data+size;
+  for (int i=1; i<nthreads; i++){
+    pstate.threads_args[i].file_start = file + (size/nthreads)*i;
+    pstate.threads_args[i].data_next_empty = &pstate.data_next_empty;
+    pstate.threads_args[i].data_end = data+size;
     // Adjust the chunks starting points until they reach a newline
     // and set it as the end for previous thread.
-    if (i!=0){
-      while (*pargs[i].file_start != '\n') {
-        pargs[i].file_start++;
-      }
-      pargs[i-1].file_end = pargs[i].file_start;
-      pargs[i].file_start++;
+    while (*pstate.threads_args[i].file_start != '\n') {
+      pstate.threads_args[i].file_start++;
     }
+    // Set end of previous to just before start of next
+    pstate.threads_args[i-1].file_end = pstate.threads_args[i].file_start;
+    pstate.threads_args[i].file_start++;
   }
-  pargs[nthreads-1].file_end = file + size;
+  pstate.threads_args[nthreads-1].file_end = file + size;
 
-  // Create threads
   for (int i=0; i<nthreads; i++){
-    if (0 != pthread_create(&threads[i], NULL, &parser_thread, &pargs[i])){
+    if (0 != pthread_create(&pstate.threads[i], NULL, &parser_thread, &pstate.threads_args[i])){
       perror("pthread_create");
       exit(-1);
     }
   }
+}
 
-  // Join threads
+void join_parser(void){
+  int nthreads = config.n_parser_threads;
   for (int i=0; i<nthreads; i++){
-    if (0 != pthread_join(threads[i], NULL)){
+    if (0 != pthread_join(pstate.threads[i], NULL)){
       perror("pthread_join");
       exit(-1);
     }
   }
-  free(threads);
-  return data_next_empty - data;
 }
 
 static inline LinkedList *insert_new(float *pt, LinkedList *head){
@@ -281,7 +303,7 @@ int main(int argc, char **argv){
         return 0;
       case 'p':
         i++;
-        if (0 >= (config.n_parser_threads = atoi(argv[i]))){
+        if (0 >= (pstate.nthreads = atoi(argv[i]))){
           perror("atoi");
           return -1;
         }
@@ -338,10 +360,12 @@ int main(int argc, char **argv){
   STOP_TIMER("init");
 
   START_TIMER();
-  long used = parse(file, data, size);
+  start_parser(file, data, size);
+  join_parser();
   STOP_TIMER("parsing");
 
   START_TIMER();
+  long used = pstate.data_next_empty - data;
   insert_into_grid(grid, data, used);
   STOP_TIMER("insertion");
 
