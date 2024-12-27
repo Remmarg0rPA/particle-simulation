@@ -314,7 +314,7 @@ int main(int argc, char **argv){
   }
   long size = sb.st_size;
 
-  char *file = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  char *file = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
   if (file == MAP_FAILED){
     perror("mmap");
     return -1;
@@ -322,13 +322,15 @@ int main(int argc, char **argv){
 
   // This will be a small overestimation of needed space for positions.xyz,
   // and a large for positions_large.xyz
-  float *data = malloc(size);
-  if (data == NULL){
-    perror("malloc");
+  // NOTE: Using MAP_ANONYMOUS appears to be much slower than not using it here.
+  float *data = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
+  if (data == MAP_FAILED){
+    perror("mmap");
     return -1;
   }
 
-  LinkedList **grid = calloc((NBB+1)*(NBB+1)*(NBB+1), sizeof(LinkedList *));
+  #define GRID_SIZE (NBB+1)*(NBB+1)*(NBB+1)
+  LinkedList **grid = calloc(GRID_SIZE, sizeof(LinkedList *));
   if (grid == NULL){
     perror("calloc");
     return -1;
@@ -348,9 +350,12 @@ int main(int argc, char **argv){
   STOP_TIMER("count");
 
   printf("%ld\n", npairs);
-  munmap(file, size);
+
+  START_TIMER();
   close(fd);
-  free(data);
+  munmap(file, size);
+  munmap(data, size);
   free(grid);
+  STOP_TIMER("cleanup");
   return 0;
 }
