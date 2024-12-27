@@ -1,7 +1,11 @@
-#define  _POSIX_C_SOURCE 200809L
-#include <stdlib.h>
-#include <stdio.h>
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
 #include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* #define TIMER */
 #ifdef TIMER
@@ -26,9 +30,9 @@ typedef struct LinkedList {
 } LinkedList;
 
 typedef struct parser_args {
-  FILE *fp;
-  float *data;
-  volatile float *data_next_empty;
+  char *file_start;
+  char *file_end;
+  volatile float **data_next_empty;
   float *data_end;
 } parser_args;
 
@@ -80,7 +84,7 @@ static inline float dist2(float *pt1, float *pt2){
   NOTE: Assumes that the first char is the start of the float
   and that they are separated by only 1 whitespace.
  */
-static inline void parse_line(char *str, float *data) {
+static inline char *parse_line(char *str, float *data) {
   char *end = NULL;
   #pragma GCC unroll 3
   for (int i=0; i<3; i++){
@@ -88,29 +92,21 @@ static inline void parse_line(char *str, float *data) {
     str = end+1;
     data++;
   }
+  return str;
 }
 
 void *parser_thread(void *__pargs){
   parser_args *pargs = (parser_args *)__pargs;
-  FILE *fp = pargs->fp;
-  float *data_next = (float *)pargs->data_next_empty;
-  float *data_end = pargs->data_end;
-
-  size_t buf_size = 0x100;
-  char *buf = malloc(buf_size);
-  float *data_ptr;
-  while (1){
-    if (0 >= getline(&buf, &buf_size, fp)){
-      break;
-    }
-    data_ptr = (float *)__atomic_fetch_add(&(pargs->data_next_empty), 3*sizeof(float), __ATOMIC_SEQ_CST);
-    parse_line(buf, data_ptr);
+  char *str = pargs->file_start;
+  float *data_ptr = NULL;
+  while (str < pargs->file_end){
+    data_ptr = (float *)__atomic_fetch_add(pargs->data_next_empty, 3*sizeof(float), __ATOMIC_SEQ_CST);
+    str = parse_line(str, data_ptr);
   }
-  if (data_next >= data_end){
+  if (data_ptr >= pargs->data_end){
     perror("parser overflow");
     exit(-1);
   }
-  free(buf);
   return NULL;
 }
 
@@ -118,19 +114,31 @@ void *parser_thread(void *__pargs){
   Parse floats into the data buffer with size bytes from fp.
   Returns number of floats read.
  */
-size_t parse(FILE *fp, float *data, size_t size){
+size_t parse(char *file, float *data, size_t size){
   const int nthreads = config.n_parser_threads;
   pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
-  parser_args pargs = {
-    .fp = fp,
-    .data = data,
-    .data_next_empty = data,
-    .data_end = data+size
-  };
+  parser_args *pargs = malloc(nthreads*sizeof(parser_args));
+  volatile float *data_next_empty = data;
+
+  for (int i=0; i<nthreads; i++){
+    pargs[i].file_start = file + (size/nthreads)*i;
+    pargs[i].data_next_empty = &data_next_empty;
+    pargs[i].data_end = data+size;
+    // Adjust the chunks starting points until they reach a newline
+    // and set it as the end for previous thread.
+    if (i!=0){
+      while (*pargs[i].file_start != '\n') {
+        pargs[i].file_start++;
+      }
+      pargs[i-1].file_end = pargs[i].file_start;
+      pargs[i].file_start++;
+    }
+  }
+  pargs[nthreads-1].file_end = file + size;
 
   // Create threads
   for (int i=0; i<nthreads; i++){
-    if (0 != pthread_create(&threads[i], NULL, &parser_thread, &pargs)){
+    if (0 != pthread_create(&threads[i], NULL, &parser_thread, &pargs[i])){
       perror("pthread_create");
       exit(-1);
     }
@@ -144,7 +152,7 @@ size_t parse(FILE *fp, float *data, size_t size){
     }
   }
   free(threads);
-  return pargs.data_next_empty - pargs.data;
+  return data_next_empty - data;
 }
 
 static inline LinkedList *insert_new(float *pt, LinkedList *head){
@@ -292,16 +300,25 @@ int main(int argc, char **argv){
     i++;
   }
 
-  FILE *fp = fopen(config.file, "r");
-  if (fp == NULL){
-    perror("fopen");
+  int fd = open(config.file, O_RDONLY);
+  if (fd == -1){
+    perror("open");
     return -1;
   }
 
   // Get file size
-  fseek(fp, 0, SEEK_END);
-  long size = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
+  struct stat sb;
+  if (fstat(fd, &sb) == -1) {
+    perror("fstat");
+    return -1;
+  }
+  long size = sb.st_size;
+
+  char *file = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (file == MAP_FAILED){
+    perror("mmap");
+    return -1;
+  }
 
   // This will be a small overestimation of needed space for positions.xyz,
   // and a large for positions_large.xyz
@@ -319,8 +336,7 @@ int main(int argc, char **argv){
   STOP_TIMER("init");
 
   START_TIMER();
-  long used = parse(fp, data, size);
-  fclose(fp);
+  long used = parse(file, data, size);
   STOP_TIMER("parsing");
 
   START_TIMER();
@@ -332,6 +348,8 @@ int main(int argc, char **argv){
   STOP_TIMER("count");
 
   printf("%ld\n", npairs);
+  munmap(file, size);
+  close(fd);
   free(data);
   free(grid);
   return 0;
