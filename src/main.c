@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -34,7 +35,14 @@ typedef struct parser_args {
   char *file_end;
   volatile float **data_next_empty;
   float *data_end;
+  float **cur_data;
 } parser_args;
+
+typedef struct insert_args {
+  volatile LinkedList **grid;
+  volatile float *data_next;
+  pthread_mutex_t mutex;
+} insert_args;
 
 typedef struct counter_args {
   LinkedList **grid;
@@ -44,26 +52,28 @@ typedef struct counter_args {
   volatile long npairs;
 } counter_args;
 
-typedef struct Config {
-  int n_parser_threads;
-  int n_count_threads;
-  char *file;
-} Config;
-
 typedef struct parser_state {
   int nthreads;
   pthread_t *threads;
   parser_args *threads_args;
   volatile float *data_next_empty;
-  volatile int n_running;
+  volatile atomic_int n_running;
+  volatile float **cur_datas;
 } parser_state;
 
+typedef struct insert_state {
+  int nthreads;
+  pthread_t *threads;
+  insert_args threads_args;
+  volatile atomic_int n_running;
+} insert_state;
 
-Config config = {
-  .n_parser_threads = 4,
-  .n_count_threads = 4,
-  .file = NULL
-};
+typedef struct counter_state {
+  int nthreads;
+  pthread_t *threads;
+  counter_args *threads_args;
+  volatile atomic_int n_running;
+} counter_state;
 
 parser_state pstate = {
   .nthreads = 4,
@@ -71,11 +81,31 @@ parser_state pstate = {
   .threads_args = NULL,
   .data_next_empty = NULL,
   .n_running = 0,
+  .cur_datas = NULL,
+};
+
+insert_state istate = {
+  .nthreads = 1,
+  .threads = NULL,
+  .threads_args = {
+    .grid = NULL,
+    .data_next = NULL,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+  },
+  .n_running = 0,
+};
+
+counter_state cstate = {
+  .nthreads = 4,
+  .threads = NULL,
+  .threads_args = NULL,
+  .n_running = 0,
 };
 
 void usage(char **argv){
   printf("Usage: %s -f <data file> [-p NUM] [-c NUM]\n", argv[0]);
   puts("\t-c Num\tNumber of threads to use while counting pairs. Default is 4.");
+  puts("\t-i Num\tNumber of threads to use for inserting the points into the grid in parallel with the parsing. Default is 1.");
   puts("\t-p Num\tNumber of threads to use while parsing. Default is 4.");
   puts("\t-h\tPrint this message and exit.");
 }
@@ -113,20 +143,22 @@ static inline char *parse_line(char *str, float *data) {
 }
 
 void *parser_thread(void *__pargs){
-  pstate.n_running += 1;
+  pstate.n_running++;
   parser_args *pargs = (parser_args *)__pargs;
   char *str = pargs->file_start;
   float *data_ptr = NULL;
   while (str < pargs->file_end){
     data_ptr = (float *)__atomic_fetch_add(pargs->data_next_empty, 3*sizeof(float), __ATOMIC_SEQ_CST);
+    *pargs->cur_data = data_ptr;
     str = parse_line(str, data_ptr);
   }
   if (data_ptr >= pargs->data_end){
-    pstate.n_running -= 1;
+    pstate.n_running--;
     perror("parser overflow");
     exit(-1);
   }
-  pstate.n_running -= 1;
+  *pargs->cur_data = pargs->data_end;
+  pstate.n_running--;
   return NULL;
 }
 
@@ -134,6 +166,7 @@ void start_parser(char *file, float *data, size_t size){
   const int nthreads = pstate.nthreads;
   pstate.threads = malloc(nthreads*sizeof(pthread_t));
   pstate.threads_args = malloc(nthreads*sizeof(parser_args));
+  pstate.cur_datas = malloc(nthreads*sizeof(float *));
   if (pstate.threads == NULL || pstate.threads_args == NULL){
     perror("malloc");
     exit(-1);
@@ -144,10 +177,12 @@ void start_parser(char *file, float *data, size_t size){
   pstate.threads_args[0].file_start = file;
   pstate.threads_args[0].data_next_empty = &pstate.data_next_empty;
   pstate.threads_args[0].data_end = data+size;
+  pstate.threads_args[0].cur_data = (float **)&pstate.cur_datas[0];
   for (int i=1; i<nthreads; i++){
     pstate.threads_args[i].file_start = file + (size/nthreads)*i;
     pstate.threads_args[i].data_next_empty = &pstate.data_next_empty;
     pstate.threads_args[i].data_end = data+size;
+    pstate.threads_args[i].cur_data = (float **)&pstate.cur_datas[i];
     // Adjust the chunks starting points until they reach a newline
     // and set it as the end for previous thread.
     while (*pstate.threads_args[i].file_start != '\n') {
@@ -168,7 +203,7 @@ void start_parser(char *file, float *data, size_t size){
 }
 
 void join_parser(void){
-  int nthreads = config.n_parser_threads;
+  int nthreads = pstate.nthreads;
   for (int i=0; i<nthreads; i++){
     if (0 != pthread_join(pstate.threads[i], NULL)){
       perror("pthread_join");
@@ -188,14 +223,96 @@ static inline LinkedList *insert_new(float *pt, LinkedList *head){
   return node;
 }
 
-void insert_into_grid(LinkedList **grid, float *data, int used){
-  for (long i=0; i<used; i+=3){
-    float *pt = &data[i];
-    // All given floats are between ±10, therefore no bounding checks are performed
-    int x = (int)((pt[0] - (-10.))/BBSIZE);
-    int y = (int)((pt[1] - (-10.))/BBSIZE);
-    int z = (int)((pt[2] - (-10.))/BBSIZE);
-    grid[INDEX(x,y,z)] = insert_new(pt, grid[INDEX(x,y,z)]);
+/*
+  Returns the first location in data which the parser is still parsing data into.
+*/
+float *min_data_cur(void){
+  float *min = (float *)pstate.cur_datas[0];
+  for (int i=1; i<pstate.nthreads; i++){
+    min = (float *) (min>pstate.cur_datas[i] ? pstate.cur_datas[i] : min);
+  }
+  return min;
+}
+
+/*
+  Insert a new point into the grid using an atomic exchange operation.
+*/
+static inline void atomic_insert_new(float *pt, LinkedList **grid){
+  int x = (int)((pt[0] - (-10.))/BBSIZE);
+  int y = (int)((pt[1] - (-10.))/BBSIZE);
+  int z = (int)((pt[2] - (-10.))/BBSIZE);
+  LinkedList *node = malloc(sizeof(LinkedList));
+  if (node == NULL) {
+    perror("malloc");
+    exit(-1);
+  }
+  node->pt = pt;
+  // Move address of node into the grid and the current address there into node->next
+  __atomic_exchange(&grid[INDEX(x,y,z)], &node, &node->next, __ATOMIC_SEQ_CST);
+  // grid[INDEX(x,y,z)] = insert_new(pt, grid[INDEX(x,y,z)]);
+}
+
+void *insert_thread(void *__iargs){
+  insert_args *iargs = (insert_args *)__iargs;
+  float *data_ptr = NULL;
+  istate.n_running++;
+  while (pstate.n_running != 0){
+    pthread_mutex_lock(&iargs->mutex);
+    data_ptr = (float *)iargs->data_next;
+    // The last elements of data_next_empty are not safe to insert
+    // since they may not have been fully parsed yet.
+    if (data_ptr >= min_data_cur()){
+      pthread_mutex_unlock(&iargs->mutex);
+      continue;
+    }
+    iargs->data_next += 3;
+    pthread_mutex_unlock(&iargs->mutex);
+    atomic_insert_new(data_ptr, (LinkedList **)iargs->grid);
+  }
+  // Insert the last elements. All elements < data_next_empty are safe
+  // since all parser threads are done
+  while (iargs->data_next < pstate.data_next_empty){
+    pthread_mutex_lock(&iargs->mutex);
+    data_ptr = (float *)iargs->data_next;
+    // The last elements of data_next_empty are not safe to insert
+    // since they may not have been fully parsed yet.
+    if (data_ptr >= pstate.data_next_empty){
+      pthread_mutex_unlock(&iargs->mutex);
+      break;
+    }
+    iargs->data_next += 3;
+    pthread_mutex_unlock(&iargs->mutex);
+    atomic_insert_new(data_ptr, (LinkedList **)iargs->grid);
+  }
+  istate.n_running--;
+  return NULL;
+}
+
+void start_insert(LinkedList **grid, float *data){
+  int nthreads = istate.nthreads;
+  istate.threads = malloc(istate.nthreads*sizeof(pthread_t));
+  istate.threads_args.grid = (volatile LinkedList **)grid;
+  istate.threads_args.data_next = data;
+  if (pthread_mutex_init(&istate.threads_args.mutex, NULL) != 0) {
+    perror("mutex");
+    exit(-1);
+  }
+
+  for (int i=0; i<nthreads; i++){
+    if (0 != pthread_create(&istate.threads[i], NULL, &insert_thread, &istate.threads_args)){
+      perror("pthread_create");
+      exit(-1);
+    }
+  }
+}
+
+void join_insert(){
+  int nthreads = istate.nthreads;
+  for (int i=0; i<nthreads; i++){
+    if (0 != pthread_join(istate.threads[i], NULL)){
+      perror("pthread_join");
+      exit(-1);
+    }
   }
 }
 
@@ -217,7 +334,7 @@ void *counter_thread(void *__cargs){
   int eidx = cargs->end_idx;
   int stride = cargs->stride;
   long npairs = 0;
-  
+
   for (int i=sidx; i<eidx; i+=stride){
     for (int j=0; j<NBB; j+=1){
       for (int k=0; k<NBB; k+=1){
@@ -250,18 +367,18 @@ void *counter_thread(void *__cargs){
 }
 
 long count(LinkedList **grid){
-  const int nthreads = config.n_count_threads;
-  pthread_t *threads = malloc(nthreads*sizeof(pthread_t));
-  counter_args *cargs = malloc(nthreads*sizeof(counter_args));
+  const int nthreads = cstate.nthreads;
+  cstate.threads = malloc(nthreads*sizeof(pthread_t));
+  cstate.threads_args = malloc(nthreads*sizeof(counter_args));
   for (int i=0; i<nthreads; i++){
-    cargs[i].grid = grid;
-    cargs[i].start_idx = i;
-    cargs[i].end_idx = NBB;
-    cargs[i].stride = nthreads;
+    cstate.threads_args[i].grid = grid;
+    cstate.threads_args[i].start_idx = i;
+    cstate.threads_args[i].end_idx = NBB;
+    cstate.threads_args[i].stride = nthreads;
   }
   // Create threads
   for (int i=0; i<nthreads; i++){
-    if (0 != pthread_create(&threads[i], NULL, &counter_thread, &cargs[i])){
+    if (0 != pthread_create(&cstate.threads[i], NULL, &counter_thread, &cstate.threads_args[i])){
       perror("pthread_create");
       exit(-1);
     }
@@ -269,19 +386,20 @@ long count(LinkedList **grid){
   long npairs = 0;
   // Join threads
   for (int i=0; i<nthreads; i++){
-    if (0 != pthread_join(threads[i], NULL)){
+    if (0 != pthread_join(cstate.threads[i], NULL)){
       perror("pthread_join");
       exit(-1);
     }
-    npairs += cargs[i].npairs;
+    npairs += cstate.threads_args[i].npairs;
   }
-  free(threads);
-  free(cargs);
+  free(cstate.threads);
+  free(cstate.threads_args);
   return npairs;
 }
 
 int main(int argc, char **argv){
   START_TIMER();
+  char *file_name = NULL;
   int i = 1;
   while (i < argc) {
     switch (argv[i][0]){
@@ -289,18 +407,25 @@ int main(int argc, char **argv){
       switch (argv[i][1]){
       case 'c':
         i++;
-        if (0 >= (config.n_count_threads = atoi(argv[i]))){
+        if (0 >= (cstate.nthreads = atoi(argv[i]))){
           perror("atoi");
           return -1;
         }
         break;
       case 'f':
         i++;
-        config.file = argv[i];
+        file_name = argv[i];
         break;
       case 'h':
         usage(argv);
         return 0;
+      case 'i':
+        i++;
+        if (0 >= (istate.nthreads = atoi(argv[i]))){
+          perror("atoi");
+          return -1;
+        }
+        break;
       case 'p':
         i++;
         if (0 >= (pstate.nthreads = atoi(argv[i]))){
@@ -322,7 +447,7 @@ int main(int argc, char **argv){
     i++;
   }
 
-  int fd = open(config.file, O_RDONLY);
+  int fd = open(file_name, O_RDONLY);
   if (fd == -1){
     perror("open");
     return -1;
@@ -361,12 +486,15 @@ int main(int argc, char **argv){
 
   START_TIMER();
   start_parser(file, data, size);
+  while (pstate.n_running == 0){
+  }
+  start_insert(grid, data);
+
   join_parser();
   STOP_TIMER("parsing");
 
   START_TIMER();
-  long used = pstate.data_next_empty - data;
-  insert_into_grid(grid, data, used);
+  join_insert();
   STOP_TIMER("insertion");
 
   START_TIMER();
