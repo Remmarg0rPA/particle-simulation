@@ -58,6 +58,7 @@ typedef struct parser_state {
   parser_args *threads_args;
   volatile float *data_next_empty;
   volatile atomic_int n_running;
+  volatile atomic_int has_started;
   volatile float **cur_datas;
 } parser_state;
 
@@ -81,6 +82,7 @@ parser_state pstate = {
   .threads_args = NULL,
   .data_next_empty = NULL,
   .n_running = 0,
+  .has_started = 0,
   .cur_datas = NULL,
 };
 
@@ -144,6 +146,7 @@ static inline char *parse_line(char *str, float *data) {
 
 void *parser_thread(void *__pargs){
   pstate.n_running++;
+  pstate.has_started++;
   parser_args *pargs = (parser_args *)__pargs;
   char *str = pargs->file_start;
   float *data_ptr = NULL;
@@ -256,7 +259,9 @@ void *insert_thread(void *__iargs){
   insert_args *iargs = (insert_args *)__iargs;
   float *data_ptr = NULL;
   istate.n_running++;
-  while (pstate.n_running != 0){
+  while (pstate.has_started == 0){
+  }
+  while (pstate.n_running != 0 || pstate.has_started < pstate.nthreads){
     pthread_mutex_lock(&iargs->mutex);
     data_ptr = (float *)iargs->data_next;
     // The last elements of data_next_empty are not safe to insert
@@ -293,10 +298,6 @@ void start_insert(LinkedList **grid, float *data){
   istate.threads = malloc(istate.nthreads*sizeof(pthread_t));
   istate.threads_args.grid = (volatile LinkedList **)grid;
   istate.threads_args.data_next = data;
-  if (pthread_mutex_init(&istate.threads_args.mutex, NULL) != 0) {
-    perror("mutex");
-    exit(-1);
-  }
 
   for (int i=0; i<nthreads; i++){
     if (0 != pthread_create(&istate.threads[i], NULL, &insert_thread, &istate.threads_args)){
@@ -486,8 +487,6 @@ int main(int argc, char **argv){
 
   START_TIMER();
   start_parser(file, data, size);
-  while (pstate.n_running == 0){
-  }
   start_insert(grid, data);
 
   join_parser();
