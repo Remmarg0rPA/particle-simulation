@@ -128,6 +128,16 @@ static inline float dist2(float *pt1, float *pt2){
   return ((pt1[0]-pt2[0])*(pt1[0]-pt2[0])) + ((pt1[1]-pt2[1])*(pt1[1]-pt2[1])) +((pt1[2]-pt2[2])*(pt1[2]-pt2[2]));
 }
 
+void join_threads(int nthreads, pthread_t *threads){
+  for (int i=0; i<nthreads; i++){
+    if (0 != pthread_join(threads[i], NULL)){
+      perror("pthread_join");
+      exit(-1);
+    }
+  }
+}
+
+
 /*
   Parses 3 floats.
   NOTE: Assumes that the first char is the start of the float
@@ -205,27 +215,6 @@ void start_parser(char *file, float *data, size_t size){
   }
 }
 
-void join_parser(void){
-  int nthreads = pstate.nthreads;
-  for (int i=0; i<nthreads; i++){
-    if (0 != pthread_join(pstate.threads[i], NULL)){
-      perror("pthread_join");
-      exit(-1);
-    }
-  }
-}
-
-static inline LinkedList *insert_new(float *pt, LinkedList *head){
-  LinkedList *node = malloc(sizeof(LinkedList));
-  if (node == NULL){
-    perror("malloc");
-    exit(-1);
-  }
-  node->pt = pt;
-  node->next = head;
-  return node;
-}
-
 /*
   Returns the first location in data which the parser is still parsing data into.
 */
@@ -252,7 +241,6 @@ static inline void atomic_insert_new(float *pt, LinkedList **grid){
   node->pt = pt;
   // Move address of node into the grid and the current address there into node->next
   __atomic_exchange(&grid[INDEX(x,y,z)], &node, &node->next, __ATOMIC_SEQ_CST);
-  // grid[INDEX(x,y,z)] = insert_new(pt, grid[INDEX(x,y,z)]);
 }
 
 void *insert_thread(void *__iargs){
@@ -302,16 +290,6 @@ void start_insert(LinkedList **grid, float *data){
   for (int i=0; i<nthreads; i++){
     if (0 != pthread_create(&istate.threads[i], NULL, &insert_thread, &istate.threads_args)){
       perror("pthread_create");
-      exit(-1);
-    }
-  }
-}
-
-void join_insert(){
-  int nthreads = istate.nthreads;
-  for (int i=0; i<nthreads; i++){
-    if (0 != pthread_join(istate.threads[i], NULL)){
-      perror("pthread_join");
       exit(-1);
     }
   }
@@ -489,11 +467,11 @@ int main(int argc, char **argv){
   start_parser(file, data, size);
   start_insert(grid, data);
 
-  join_parser();
+  join_threads(pstate.nthreads, pstate.threads);
   STOP_TIMER("parsing");
 
   START_TIMER();
-  join_insert();
+  join_threads(istate.nthreads, istate.threads);
   STOP_TIMER("insertion");
 
   START_TIMER();
