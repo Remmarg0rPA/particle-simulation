@@ -35,14 +35,7 @@ typedef struct parser_args {
   char *file_end;
   volatile float **data_next_empty;
   float *data_end;
-  float **cur_data;
 } parser_args;
-
-typedef struct insert_args {
-  volatile LinkedList **grid;
-  volatile float *data_next;
-  pthread_mutex_t mutex;
-} insert_args;
 
 typedef struct counter_args {
   LinkedList **grid;
@@ -57,17 +50,10 @@ typedef struct parser_state {
   pthread_t *threads;
   parser_args *threads_args;
   volatile float *data_next_empty;
+  volatile LinkedList **grid;
   volatile atomic_int n_running;
   volatile atomic_int has_started;
-  volatile float **cur_datas;
 } parser_state;
-
-typedef struct insert_state {
-  int nthreads;
-  pthread_t *threads;
-  insert_args threads_args;
-  volatile atomic_int n_running;
-} insert_state;
 
 typedef struct counter_state {
   int nthreads;
@@ -81,20 +67,9 @@ parser_state pstate = {
   .threads = NULL,
   .threads_args = NULL,
   .data_next_empty = NULL,
+  .grid = NULL,
   .n_running = 0,
   .has_started = 0,
-  .cur_datas = NULL,
-};
-
-insert_state istate = {
-  .nthreads = 1,
-  .threads = NULL,
-  .threads_args = {
-    .grid = NULL,
-    .data_next = NULL,
-    .mutex = PTHREAD_MUTEX_INITIALIZER,
-  },
-  .n_running = 0,
 };
 
 counter_state cstate = {
@@ -137,6 +112,22 @@ void join_threads(int nthreads, pthread_t *threads){
   }
 }
 
+/*
+  Insert a new point into the grid using an atomic exchange operation.
+*/
+static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
+  int x = (int)((pt[0] - (-10.))/BBSIZE);
+  int y = (int)((pt[1] - (-10.))/BBSIZE);
+  int z = (int)((pt[2] - (-10.))/BBSIZE);
+  LinkedList *node = malloc(sizeof(LinkedList));
+  if (node == NULL) {
+    perror("malloc");
+    exit(-1);
+  }
+  node->pt = pt;
+  // Move address of node into the grid and the current address there into node->next
+  __atomic_exchange(&grid[INDEX(x,y,z)], &node, &node->next, __ATOMIC_SEQ_CST);
+}
 
 /*
   Parses 3 floats.
@@ -160,42 +151,40 @@ void *parser_thread(void *__pargs){
   parser_args *pargs = (parser_args *)__pargs;
   char *str = pargs->file_start;
   float *data_ptr = NULL;
+  volatile LinkedList **grid = pstate.grid;
   while (str < pargs->file_end){
     data_ptr = (float *)__atomic_fetch_add(pargs->data_next_empty, 3*sizeof(float), __ATOMIC_SEQ_CST);
-    *pargs->cur_data = data_ptr;
     str = parse_line(str, data_ptr);
+    atomic_insert_new(data_ptr, grid);
   }
   if (data_ptr >= pargs->data_end){
     pstate.n_running--;
     perror("parser overflow");
     exit(-1);
   }
-  *pargs->cur_data = pargs->data_end;
   pstate.n_running--;
   return NULL;
 }
 
-void start_parser(char *file, float *data, size_t size){
+void start_parser(char *file, float *data, size_t size, LinkedList **grid){
   const int nthreads = pstate.nthreads;
   pstate.threads = malloc(nthreads*sizeof(pthread_t));
   pstate.threads_args = malloc(nthreads*sizeof(parser_args));
-  pstate.cur_datas = malloc(nthreads*sizeof(float *));
   if (pstate.threads == NULL || pstate.threads_args == NULL){
     perror("malloc");
     exit(-1);
   }
   pstate.data_next_empty = data;
+  pstate.grid = (volatile LinkedList **)grid;
 
   // Init args to threads
   pstate.threads_args[0].file_start = file;
   pstate.threads_args[0].data_next_empty = &pstate.data_next_empty;
   pstate.threads_args[0].data_end = data+size;
-  pstate.threads_args[0].cur_data = (float **)&pstate.cur_datas[0];
   for (int i=1; i<nthreads; i++){
     pstate.threads_args[i].file_start = file + (size/nthreads)*i;
     pstate.threads_args[i].data_next_empty = &pstate.data_next_empty;
     pstate.threads_args[i].data_end = data+size;
-    pstate.threads_args[i].cur_data = (float **)&pstate.cur_datas[i];
     // Adjust the chunks starting points until they reach a newline
     // and set it as the end for previous thread.
     while (*pstate.threads_args[i].file_start != '\n') {
@@ -209,86 +198,6 @@ void start_parser(char *file, float *data, size_t size){
 
   for (int i=0; i<nthreads; i++){
     if (0 != pthread_create(&pstate.threads[i], NULL, &parser_thread, &pstate.threads_args[i])){
-      perror("pthread_create");
-      exit(-1);
-    }
-  }
-}
-
-/*
-  Returns the first location in data which the parser is still parsing data into.
-*/
-float *min_data_cur(void){
-  float *min = (float *)pstate.cur_datas[0];
-  for (int i=1; i<pstate.nthreads; i++){
-    min = (float *) (min>pstate.cur_datas[i] ? pstate.cur_datas[i] : min);
-  }
-  return min;
-}
-
-/*
-  Insert a new point into the grid using an atomic exchange operation.
-*/
-static inline void atomic_insert_new(float *pt, LinkedList **grid){
-  int x = (int)((pt[0] - (-10.))/BBSIZE);
-  int y = (int)((pt[1] - (-10.))/BBSIZE);
-  int z = (int)((pt[2] - (-10.))/BBSIZE);
-  LinkedList *node = malloc(sizeof(LinkedList));
-  if (node == NULL) {
-    perror("malloc");
-    exit(-1);
-  }
-  node->pt = pt;
-  // Move address of node into the grid and the current address there into node->next
-  __atomic_exchange(&grid[INDEX(x,y,z)], &node, &node->next, __ATOMIC_SEQ_CST);
-}
-
-void *insert_thread(void *__iargs){
-  insert_args *iargs = (insert_args *)__iargs;
-  float *data_ptr = NULL;
-  istate.n_running++;
-  while (pstate.has_started == 0){
-  }
-  while (pstate.n_running != 0 || pstate.has_started < pstate.nthreads){
-    pthread_mutex_lock(&iargs->mutex);
-    data_ptr = (float *)iargs->data_next;
-    // The last elements of data_next_empty are not safe to insert
-    // since they may not have been fully parsed yet.
-    if (data_ptr >= min_data_cur()){
-      pthread_mutex_unlock(&iargs->mutex);
-      continue;
-    }
-    iargs->data_next += 3;
-    pthread_mutex_unlock(&iargs->mutex);
-    atomic_insert_new(data_ptr, (LinkedList **)iargs->grid);
-  }
-  // Insert the last elements. All elements < data_next_empty are safe
-  // since all parser threads are done
-  while (iargs->data_next < pstate.data_next_empty){
-    pthread_mutex_lock(&iargs->mutex);
-    data_ptr = (float *)iargs->data_next;
-    // The last elements of data_next_empty are not safe to insert
-    // since they may not have been fully parsed yet.
-    if (data_ptr >= pstate.data_next_empty){
-      pthread_mutex_unlock(&iargs->mutex);
-      break;
-    }
-    iargs->data_next += 3;
-    pthread_mutex_unlock(&iargs->mutex);
-    atomic_insert_new(data_ptr, (LinkedList **)iargs->grid);
-  }
-  istate.n_running--;
-  return NULL;
-}
-
-void start_insert(LinkedList **grid, float *data){
-  int nthreads = istate.nthreads;
-  istate.threads = malloc(istate.nthreads*sizeof(pthread_t));
-  istate.threads_args.grid = (volatile LinkedList **)grid;
-  istate.threads_args.data_next = data;
-
-  for (int i=0; i<nthreads; i++){
-    if (0 != pthread_create(&istate.threads[i], NULL, &insert_thread, &istate.threads_args)){
       perror("pthread_create");
       exit(-1);
     }
@@ -398,13 +307,6 @@ int main(int argc, char **argv){
       case 'h':
         usage(argv);
         return 0;
-      case 'i':
-        i++;
-        if (0 >= (istate.nthreads = atoi(argv[i]))){
-          perror("atoi");
-          return -1;
-        }
-        break;
       case 'p':
         i++;
         if (0 >= (pstate.nthreads = atoi(argv[i]))){
@@ -464,15 +366,9 @@ int main(int argc, char **argv){
   STOP_TIMER("init");
 
   START_TIMER();
-  start_parser(file, data, size);
-  start_insert(grid, data);
-
+  start_parser(file, data, size, grid);
   join_threads(pstate.nthreads, pstate.threads);
   STOP_TIMER("parsing");
-
-  START_TIMER();
-  join_threads(istate.nthreads, istate.threads);
-  STOP_TIMER("insertion");
 
   START_TIMER();
   long npairs = count(grid);
