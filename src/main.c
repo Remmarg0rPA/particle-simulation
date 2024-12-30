@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <fcntl.h>
 #include <pthread.h>
+#include <smmintrin.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,19 +89,11 @@ void usage(char **argv){
 }
 
 static inline float dist2(float *pt1, float *pt2){
-  /*
-    NOTE: Using the loop will yield incorrect, but almost identical code.
-    It will use one more `vfmadd132ss`, instead of a `vmulss`, resulting
-    in it counting one extra point pair.
-  */
-  /*
-  float sum = 0;
-  for (int i=0; i<3; i++){
-    sum += (pt1[i]-pt2[i])*(pt1[i]-pt2[i]);
-  }
-  return sum;
-  */
-  return ((pt1[0]-pt2[0])*(pt1[0]-pt2[0])) + ((pt1[1]-pt2[1])*(pt1[1]-pt2[1])) +((pt1[2]-pt2[2])*(pt1[2]-pt2[2]));
+  __m128 v1 = _mm_load_ps(pt1);
+  __m128 v2 = _mm_load_ps(pt2);
+  __m128 diff = v1-v2;
+  __m128 dp = _mm_dp_ps(diff, diff, 0xff);
+  return _mm_cvtss_f32(dp);
 }
 
 void join_threads(int nthreads, pthread_t *threads){
@@ -142,6 +135,7 @@ static inline char *parse_line(char *str, float *data) {
     str = end+1;
     data++;
   }
+  *data = 0;
   return str;
 }
 
@@ -153,7 +147,7 @@ void *parser_thread(void *__pargs){
   float *data_ptr = NULL;
   volatile LinkedList **grid = pstate.grid;
   while (str < pargs->file_end){
-    data_ptr = (float *)__atomic_fetch_add(pargs->data_next_empty, 3*sizeof(float), __ATOMIC_SEQ_CST);
+    data_ptr = (float *)__atomic_fetch_add(pargs->data_next_empty, 4*sizeof(float), __ATOMIC_SEQ_CST);
     str = parse_line(str, data_ptr);
     atomic_insert_new(data_ptr, grid);
   }
