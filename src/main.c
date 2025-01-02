@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <pthread.h>
 #include <smmintrin.h>
@@ -89,10 +89,10 @@ void usage(char **argv){
 }
 
 static inline float dist2(float *pt1, float *pt2){
-  __m128 v1 = _mm_load_ps(pt1);
-  __m128 v2 = _mm_load_ps(pt2);
+  __m128 v1 = _mm_loadu_ps(pt1);
+  __m128 v2 = _mm_loadu_ps(pt2);
   __m128 diff = v1-v2;
-  __m128 dp = _mm_dp_ps(diff, diff, 0xff);
+  __m128 dp = _mm_dp_ps(diff, diff, 0x71);
   return _mm_cvtss_f32(dp);
 }
 
@@ -135,7 +135,6 @@ static inline char *parse_line(char *str, float *data) {
     str = end+1;
     data++;
   }
-  *data = 0;
   return str;
 }
 
@@ -350,6 +349,9 @@ int main(int argc, char **argv){
     perror("mmap");
     return -1;
   }
+  if (0 != madvise(data, size, MADV_SEQUENTIAL)){
+    perror("madvise");
+  }
 
   #define GRID_SIZE (NBB+1)*(NBB+1)*(NBB+1)
   LinkedList **grid = calloc(GRID_SIZE, sizeof(LinkedList *));
@@ -365,6 +367,9 @@ int main(int argc, char **argv){
   STOP_TIMER("parsing");
 
   START_TIMER();
+  if (0 != madvise(data, size, MADV_NORMAL)){
+    perror("madvise");
+  }
   long npairs = count(grid);
   STOP_TIMER("count");
 
