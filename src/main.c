@@ -26,15 +26,16 @@ struct timeval stop, start;
 #define NBB (int)((10-(-10))/BBSIZE+1 + 2)
 #define INDEX(i,j,k) ((i+1)*NBB*NBB + (j+1)*NBB + (k+1))
 
+#define CHUNK_SIZE 16
 typedef struct LinkedList {
-  float *pt;
+  float pt[4*CHUNK_SIZE];
   struct LinkedList *next;
+  int used;
 } LinkedList;
 
 typedef struct parser_args {
   char *file_start;
   char *file_end;
-  volatile float **data_next_empty;
   float *data_end;
 } parser_args;
 
@@ -50,7 +51,6 @@ typedef struct parser_state {
   int nthreads;
   pthread_t *threads;
   parser_args *threads_args;
-  volatile float *data_next_empty;
   volatile LinkedList **grid;
   volatile atomic_int n_running;
   volatile atomic_int has_started;
@@ -67,7 +67,6 @@ parser_state pstate = {
   .nthreads = 4,
   .threads = NULL,
   .threads_args = NULL,
-  .data_next_empty = NULL,
   .grid = NULL,
   .n_running = 0,
   .has_started = 0,
@@ -105,6 +104,7 @@ void join_threads(int nthreads, pthread_t *threads){
   }
 }
 
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 /*
   Insert a new point into the grid using an atomic exchange operation.
 */
@@ -112,14 +112,44 @@ static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
   int x = (int)((pt[0] - (-10.))/BBSIZE);
   int y = (int)((pt[1] - (-10.))/BBSIZE);
   int z = (int)((pt[2] - (-10.))/BBSIZE);
-  LinkedList *node = malloc(sizeof(LinkedList));
-  if (node == NULL) {
-    perror("malloc");
-    exit(-1);
+  int used = 0;
+
+  if (grid[INDEX(x,y,z)] != NULL){
+    used = __atomic_fetch_add(&grid[INDEX(x,y,z)]->used, 1, __ATOMIC_SEQ_CST);
   }
-  node->pt = pt;
-  // Move address of node into the grid and the current address there into node->next
-  __atomic_exchange(&grid[INDEX(x,y,z)], &node, &node->next, __ATOMIC_SEQ_CST);
+  if (grid[INDEX(x,y,z)] == NULL || used >= CHUNK_SIZE){
+    pthread_mutex_lock(&mutex);
+    if (grid[INDEX(x,y,z)] != NULL && grid[INDEX(x,y,z)]->used < CHUNK_SIZE){
+      used = __atomic_fetch_add(&grid[INDEX(x,y,z)]->used, 1, __ATOMIC_SEQ_CST);
+      grid[INDEX(x,y,z)]->pt[used*4 + 0] = pt[0];
+      grid[INDEX(x,y,z)]->pt[used*4 + 1] = pt[1];
+      grid[INDEX(x,y,z)]->pt[used*4 + 2] = pt[2];
+      pthread_mutex_unlock(&mutex);
+      return;
+    }
+    LinkedList *node = calloc(1, sizeof(LinkedList));
+    if (node == NULL) {
+      perror("calloc");
+      exit(-1);
+    }
+    node->used = 1;
+    // Move address of node into the grid and the current address there into node->next
+    __atomic_exchange(&grid[INDEX(x,y,z)], (volatile LinkedList **)&node,
+                      (volatile LinkedList **)&node->next, __ATOMIC_SEQ_CST);
+    pthread_mutex_unlock(&mutex);
+    node->pt[0] = pt[0];
+    node->pt[1] = pt[1];
+    node->pt[2] = pt[2];
+    if (used >= CHUNK_SIZE){
+      if (node->next->used > CHUNK_SIZE){
+        node->next->used = CHUNK_SIZE;
+      }
+    }
+  } else {
+    grid[INDEX(x,y,z)]->pt[used*4 + 0] = pt[0];
+    grid[INDEX(x,y,z)]->pt[used*4 + 1] = pt[1];
+    grid[INDEX(x,y,z)]->pt[used*4 + 2] = pt[2];
+  }
 }
 
 /*
@@ -143,17 +173,11 @@ void *parser_thread(void *__pargs){
   pstate.has_started++;
   parser_args *pargs = (parser_args *)__pargs;
   char *str = pargs->file_start;
-  float *data_ptr = NULL;
+  float data_buf[4];
   volatile LinkedList **grid = pstate.grid;
   while (str < pargs->file_end){
-    data_ptr = (float *)__atomic_fetch_add(pargs->data_next_empty, 4*sizeof(float), __ATOMIC_SEQ_CST);
-    str = parse_line(str, data_ptr);
-    atomic_insert_new(data_ptr, grid);
-  }
-  if (data_ptr >= pargs->data_end){
-    pstate.n_running--;
-    perror("parser overflow");
-    exit(-1);
+    str = parse_line(str, data_buf);
+    atomic_insert_new(data_buf, grid);
   }
   pstate.n_running--;
   return NULL;
@@ -167,16 +191,13 @@ void start_parser(char *file, float *data, size_t size, LinkedList **grid){
     perror("malloc");
     exit(-1);
   }
-  pstate.data_next_empty = data;
   pstate.grid = (volatile LinkedList **)grid;
 
   // Init args to threads
   pstate.threads_args[0].file_start = file;
-  pstate.threads_args[0].data_next_empty = &pstate.data_next_empty;
   pstate.threads_args[0].data_end = data+size;
   for (int i=1; i<nthreads; i++){
     pstate.threads_args[i].file_start = file + (size/nthreads)*i;
-    pstate.threads_args[i].data_next_empty = &pstate.data_next_empty;
     pstate.threads_args[i].data_end = data+size;
     // Adjust the chunks starting points until they reach a newline
     // and set it as the end for previous thread.
@@ -197,12 +218,21 @@ void start_parser(char *file, float *data, size_t size, LinkedList **grid){
   }
 }
 
+int count_chunk(float pt[4], LinkedList *chunk){
+  int count = 0;
+  int used = chunk->used;
+  for (int i=0; i<used; i++){
+    if (dist2(pt, &chunk->pt[i*4])<=0.0025){
+      count++;
+    }
+  }
+  return count;
+}
+
 int compare(float *pt, LinkedList *head){
   int count = 0;
   while (head != NULL){
-    if (dist2(pt, head->pt) <= 0.05*0.05){
-      count += 1;
-    }
+    count += count_chunk(pt, head);
     head = head->next;
   }
   return count;
@@ -221,24 +251,34 @@ void *counter_thread(void *__cargs){
       for (int k=0; k<NBB; k+=1){
         LinkedList *head = grid[INDEX(i,j,k)];
         while (head!=NULL){
-          float *cur = head->pt;
-          head = head->next;
-          npairs += compare(cur, head);
+          int used = head->used;
+          for (int n=0; n<used; n++){
+            float *cur = &head->pt[n*4];
+            // Compare point with points after it in current chunk
+            for (int m=n+1; m<used; m++){
+              if (dist2(cur, &head->pt[m*4])<=0.0025){
+                npairs++;
+              }
+            }
+            // Compare with following chunks in the same cell
+            npairs += compare(cur, head->next);
 
-          // Check neighbouring cells
-          npairs += compare(cur, grid[INDEX(i+1, j, k)]);
-          npairs += compare(cur, grid[INDEX(i+1, j+1, k)]);
-          npairs += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
-          npairs += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
-          npairs += compare(cur, grid[INDEX(i+1, j-1, k)]);
-          npairs += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
-          npairs += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
-          npairs += compare(cur, grid[INDEX(i+1, j, k-1)]);
-          npairs += compare(cur, grid[INDEX(i+1, j, k+1)]);
-          npairs += compare(cur, grid[INDEX(i, j+1, k)]);
-          npairs += compare(cur, grid[INDEX(i, j+1, k+1)]);
-          npairs += compare(cur, grid[INDEX(i, j+1, k-1)]);
-          npairs += compare(cur, grid[INDEX(i, j, k+1)]);
+            // Check neighbouring cells
+            npairs += compare(cur, grid[INDEX(i+1, j, k)]);
+            npairs += compare(cur, grid[INDEX(i+1, j+1, k)]);
+            npairs += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
+            npairs += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
+            npairs += compare(cur, grid[INDEX(i+1, j-1, k)]);
+            npairs += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
+            npairs += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
+            npairs += compare(cur, grid[INDEX(i+1, j, k-1)]);
+            npairs += compare(cur, grid[INDEX(i+1, j, k+1)]);
+            npairs += compare(cur, grid[INDEX(i, j+1, k)]);
+            npairs += compare(cur, grid[INDEX(i, j+1, k+1)]);
+            npairs += compare(cur, grid[INDEX(i, j+1, k-1)]);
+            npairs += compare(cur, grid[INDEX(i, j, k+1)]);
+          }
+          head = head->next;
         }
       }
     }
