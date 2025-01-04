@@ -104,7 +104,6 @@ void join_threads(int nthreads, pthread_t *threads){
   }
 }
 
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 /*
   Insert a new point into the grid using an atomic exchange operation.
 */
@@ -112,21 +111,11 @@ static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
   int x = (int)((pt[0] - (-10.))/BBSIZE);
   int y = (int)((pt[1] - (-10.))/BBSIZE);
   int z = (int)((pt[2] - (-10.))/BBSIZE);
-  int used = 0;
 
-  if (grid[INDEX(x,y,z)] != NULL){
-    used = __atomic_fetch_add(&grid[INDEX(x,y,z)]->used, 1, __ATOMIC_SEQ_CST);
-  }
-  if (grid[INDEX(x,y,z)] == NULL || used >= CHUNK_SIZE){
-    pthread_mutex_lock(&mutex);
-    if (grid[INDEX(x,y,z)] != NULL && grid[INDEX(x,y,z)]->used < CHUNK_SIZE){
-      used = __atomic_fetch_add(&grid[INDEX(x,y,z)]->used, 1, __ATOMIC_SEQ_CST);
-      grid[INDEX(x,y,z)]->pt[used*4 + 0] = pt[0];
-      grid[INDEX(x,y,z)]->pt[used*4 + 1] = pt[1];
-      grid[INDEX(x,y,z)]->pt[used*4 + 2] = pt[2];
-      pthread_mutex_unlock(&mutex);
-      return;
-    }
+  // Create a new chunk in the cell. More than one chunk might be created by
+  // multiple threads trying to insert simultaneously. This does not affect
+  // the end result, but some chunks might not be full.
+  if (grid[INDEX(x,y,z)] == NULL){
     LinkedList *node = calloc(1, sizeof(LinkedList));
     if (node == NULL) {
       perror("calloc");
@@ -136,20 +125,33 @@ static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
     // Move address of node into the grid and the current address there into node->next
     __atomic_exchange(&grid[INDEX(x,y,z)], (volatile LinkedList **)&node,
                       (volatile LinkedList **)&node->next, __ATOMIC_SEQ_CST);
-    pthread_mutex_unlock(&mutex);
     node->pt[0] = pt[0];
     node->pt[1] = pt[1];
     node->pt[2] = pt[2];
-    if (used >= CHUNK_SIZE){
-      if (node->next->used > CHUNK_SIZE){
-        node->next->used = CHUNK_SIZE;
-      }
-    }
-  } else {
-    grid[INDEX(x,y,z)]->pt[used*4 + 0] = pt[0];
-    grid[INDEX(x,y,z)]->pt[used*4 + 1] = pt[1];
-    grid[INDEX(x,y,z)]->pt[used*4 + 2] = pt[2];
+    return;
   }
+
+  volatile LinkedList *cell = __atomic_load_n(&grid[INDEX(x,y,z)], __ATOMIC_SEQ_CST);
+  int used = __atomic_add_fetch(&cell->used, 1, __ATOMIC_SEQ_CST);
+  // Thread filling last slot is responsible for creating a new chunk
+  if (used == CHUNK_SIZE){
+    LinkedList *node = calloc(1, sizeof(LinkedList));
+    if (node == NULL) {
+      perror("calloc");
+      exit(-1);
+    }
+    // Move address of node into the grid and the current address there into node->next
+    __atomic_exchange(&grid[INDEX(x,y,z)], (volatile LinkedList **)&node,
+                      (volatile LinkedList **)&node->next, __ATOMIC_SEQ_CST);
+  } else if (used > CHUNK_SIZE){
+    // Restore cell->used and loop back until a new chunk has been inserted
+    cell->used = CHUNK_SIZE;
+    atomic_insert_new(pt, grid);
+    return;
+  }
+  cell->pt[(used-1)*4 + 0] = pt[0];
+  cell->pt[(used-1)*4 + 1] = pt[1];
+  cell->pt[(used-1)*4 + 2] = pt[2];
 }
 
 /*
