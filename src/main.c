@@ -9,6 +9,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define PARSE_IMPLEMENTATION
+#include "parse.h"
+
 /* #define TIMER */
 #ifdef TIMER
 #include <sys/time.h>
@@ -157,14 +160,16 @@ static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
 /*
   Parses 3 floats.
   NOTE: Assumes that the first char is the start of the float
-  and that they are separated by only 1 whitespace.
  */
 static inline char *parse_line(char *str, float *data) {
   char *end = NULL;
   #pragma GCC unroll 3
   for (int i=0; i<3; i++){
-    *data = strtof(str, &end);
+    *data = parse_float(str, &end);
     str = end+1;
+    while (*str<=' ' && *str>'\0'){
+      str++;
+    }
     data++;
   }
   return str;
