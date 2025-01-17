@@ -39,7 +39,6 @@ typedef struct LinkedList {
 typedef struct parser_args {
   char *file_start;
   char *file_end;
-  float *data_end;
 } parser_args;
 
 typedef struct counter_args {
@@ -85,7 +84,6 @@ counter_state cstate = {
 void usage(char **argv){
   printf("Usage: %s -f <data file> [-p NUM] [-c NUM]\n", argv[0]);
   puts("\t-c Num\tNumber of threads to use while counting pairs. Default is 4.");
-  puts("\t-i Num\tNumber of threads to use for inserting the points into the grid in parallel with the parsing. Default is 1.");
   puts("\t-p Num\tNumber of threads to use while parsing. Default is 4.");
   puts("\t-h\tPrint this message and exit.");
 }
@@ -190,7 +188,7 @@ void *parser_thread(void *__pargs){
   return NULL;
 }
 
-void start_parser(char *file, float *data, size_t size, LinkedList **grid){
+void start_parser(char *file, size_t size, LinkedList **grid){
   const int nthreads = pstate.nthreads;
   pstate.threads = malloc(nthreads*sizeof(pthread_t));
   pstate.threads_args = malloc(nthreads*sizeof(parser_args));
@@ -202,10 +200,8 @@ void start_parser(char *file, float *data, size_t size, LinkedList **grid){
 
   // Init args to threads
   pstate.threads_args[0].file_start = file;
-  pstate.threads_args[0].data_end = data+size;
   for (int i=1; i<nthreads; i++){
     pstate.threads_args[i].file_start = file + (size/nthreads)*i;
-    pstate.threads_args[i].data_end = data+size;
     // Adjust the chunks starting points until they reach a newline
     // and set it as the end for previous thread.
     while (*pstate.threads_args[i].file_start != '\n') {
@@ -388,18 +384,6 @@ int main(int argc, char **argv){
     return -1;
   }
 
-  // This will be a small overestimation of needed space for positions.xyz,
-  // and a large for positions_large.xyz
-  // NOTE: Using MAP_ANONYMOUS appears to be much slower than not using it here.
-  float *data = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
-  if (data == MAP_FAILED){
-    perror("mmap");
-    return -1;
-  }
-  if (0 != madvise(data, size, MADV_SEQUENTIAL)){
-    perror("madvise");
-  }
-
   #define GRID_SIZE (NBB+1)*(NBB+1)*(NBB+1)
   LinkedList **grid = calloc(GRID_SIZE, sizeof(LinkedList *));
   if (grid == NULL){
@@ -409,14 +393,11 @@ int main(int argc, char **argv){
   STOP_TIMER("init");
 
   START_TIMER();
-  start_parser(file, data, size, grid);
+  start_parser(file, size, grid);
   join_threads(pstate.nthreads, pstate.threads);
   STOP_TIMER("parsing");
 
   START_TIMER();
-  if (0 != madvise(data, size, MADV_NORMAL)){
-    perror("madvise");
-  }
   long npairs = count(grid);
   STOP_TIMER("count");
 
@@ -425,7 +406,6 @@ int main(int argc, char **argv){
   START_TIMER();
   close(fd);
   munmap(file, size);
-  munmap(data, size);
   free(grid);
   STOP_TIMER("cleanup");
   return 0;
