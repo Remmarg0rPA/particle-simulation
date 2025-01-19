@@ -125,15 +125,15 @@ static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
     node->used = 1;
     // Move address of node into the grid and the current address there into node->next
     __atomic_exchange(&grid[INDEX(x,y,z)], (volatile LinkedList **)&node,
-                      (volatile LinkedList **)&node->next, __ATOMIC_SEQ_CST);
+                      (volatile LinkedList **)&node->next, __ATOMIC_RELEASE);
     node->pt[0] = pt[0];
     node->pt[1] = pt[1];
     node->pt[2] = pt[2];
     return;
   }
 
-  volatile LinkedList *cell = __atomic_load_n(&grid[INDEX(x,y,z)], __ATOMIC_SEQ_CST);
-  int used = __atomic_add_fetch(&cell->used, 1, __ATOMIC_SEQ_CST);
+  volatile LinkedList *cell = __atomic_load_n(&grid[INDEX(x,y,z)], __ATOMIC_RELAXED);
+  int used = __atomic_add_fetch(&cell->used, 1, __ATOMIC_RELAXED);
   // Thread filling last slot is responsible for creating a new chunk
   if (used == CHUNK_SIZE){
     LinkedList *node = calloc(1, sizeof(LinkedList));
@@ -143,7 +143,7 @@ static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
     }
     // Move address of node into the grid and the current address there into node->next
     __atomic_exchange(&grid[INDEX(x,y,z)], (volatile LinkedList **)&node,
-                      (volatile LinkedList **)&node->next, __ATOMIC_SEQ_CST);
+                      (volatile LinkedList **)&node->next, __ATOMIC_RELAXED);
   } else if (used > CHUNK_SIZE){
     // Restore cell->used and loop back until a new chunk has been inserted
     cell->used = CHUNK_SIZE;
@@ -399,9 +399,8 @@ int main(int argc, char **argv){
 
   START_TIMER();
   long npairs = count(grid);
-  STOP_TIMER("count");
-
   printf("%ld\n", npairs);
+  STOP_TIMER("count");
 
   START_TIMER();
   close(fd);
