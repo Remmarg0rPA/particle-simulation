@@ -36,11 +36,6 @@ typedef struct LinkedList {
   int used;
 } LinkedList;
 
-typedef struct parser_args {
-  char *file_start;
-  char *file_end;
-} parser_args;
-
 typedef struct counter_args {
   LinkedList **grid;
   int start_idx;
@@ -52,10 +47,11 @@ typedef struct counter_args {
 typedef struct parser_state {
   int nthreads;
   pthread_t *threads;
-  parser_args *threads_args;
   volatile LinkedList **grid;
+  char *file;
+  size_t file_size;
   volatile atomic_int n_running;
-  volatile atomic_int has_started;
+  volatile int has_started;
 } parser_state;
 
 typedef struct counter_state {
@@ -68,8 +64,9 @@ typedef struct counter_state {
 parser_state pstate = {
   .nthreads = 4,
   .threads = NULL,
-  .threads_args = NULL,
   .grid = NULL,
+  .file = NULL,
+  .file_size = 0,
   .n_running = 0,
   .has_started = 0,
 };
@@ -165,22 +162,45 @@ static inline char *parse_line(char *str, float *data) {
   for (int i=0; i<3; i++){
     *data = parse_float(str, &end);
     str = end+1;
-    while (*str<=' ' && *str>'\0'){
-      str++;
-    }
     data++;
+  }
+  while (*str<' ' && *str>'\0'){
+    str++;
   }
   return str;
 }
 
-void *parser_thread(void *__pargs){
+void *parser_thread(){
+  // Increment the active threads count
+  int ptid = __atomic_fetch_add(&pstate.has_started, 1, __ATOMIC_SEQ_CST);
   pstate.n_running++;
-  pstate.has_started++;
-  parser_args *pargs = (parser_args *)__pargs;
-  char *str = pargs->file_start;
+  int nthreads = pstate.nthreads;
+  char *file_start = pstate.file;
+  size_t file_size = pstate.file_size;
+  size_t chunk_size = file_size/nthreads;
+  // Calculate start of section to parse
+  char *str = file_start + ptid*chunk_size;
+  // Advance start to beginning of a float
+  if (ptid != 0){
+    while (*str > '\n'){
+      str++;
+    }
+    str++;
+  }
+  // Calculate end of section to parse
+  char *file_end;
+  if (ptid == nthreads-1){
+    file_end = file_start + file_size;
+  } else {
+    file_end = file_start + (ptid+1)*chunk_size;
+    // Make sure that it ends with a new line
+    while (*file_end > '\n'){
+      file_end++;
+    }
+  }
   float data_buf[4];
   volatile LinkedList **grid = pstate.grid;
-  while (str < pargs->file_end){
+  while (str < file_end){
     str = parse_line(str, data_buf);
     atomic_insert_new(data_buf, grid);
   }
@@ -191,30 +211,15 @@ void *parser_thread(void *__pargs){
 void start_parser(char *file, size_t size, LinkedList **grid){
   const int nthreads = pstate.nthreads;
   pstate.threads = malloc(nthreads*sizeof(pthread_t));
-  pstate.threads_args = malloc(nthreads*sizeof(parser_args));
-  if (pstate.threads == NULL || pstate.threads_args == NULL){
+  if (pstate.threads == NULL){
     perror("malloc");
     exit(-1);
   }
   pstate.grid = (volatile LinkedList **)grid;
-
-  // Init args to threads
-  pstate.threads_args[0].file_start = file;
-  for (int i=1; i<nthreads; i++){
-    pstate.threads_args[i].file_start = file + (size/nthreads)*i;
-    // Adjust the chunks starting points until they reach a newline
-    // and set it as the end for previous thread.
-    while (*pstate.threads_args[i].file_start != '\n') {
-      pstate.threads_args[i].file_start++;
-    }
-    // Set end of previous to just before start of next
-    pstate.threads_args[i-1].file_end = pstate.threads_args[i].file_start;
-    pstate.threads_args[i].file_start++;
-  }
-  pstate.threads_args[nthreads-1].file_end = file + size;
-
+  pstate.file = file;
+  pstate.file_size = size;
   for (int i=0; i<nthreads; i++){
-    if (0 != pthread_create(&pstate.threads[i], NULL, &parser_thread, &pstate.threads_args[i])){
+    if (0 != pthread_create(&pstate.threads[i], NULL, &parser_thread, NULL)){
       perror("pthread_create");
       exit(-1);
     }
