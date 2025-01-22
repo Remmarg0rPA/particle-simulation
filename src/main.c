@@ -27,7 +27,9 @@ struct timeval stop, start;
 
 #define BBSIZE 0.1
 #define NBB (int)((10-(-10))/BBSIZE+1 + 2)
-#define INDEX(i,j,k) ((i+1)*NBB*NBB + (j+1)*NBB + (k+1))
+#define INDEX(i,j,k) ((i)*NBB*NBB + (j)*NBB + (k))
+
+#define MIN(x,y) ((x)<(y)?(x):(y))
 
 #define CHUNK_SIZE 16
 typedef struct LinkedList {
@@ -35,14 +37,6 @@ typedef struct LinkedList {
   struct LinkedList *next;
   int used;
 } LinkedList;
-
-typedef struct counter_args {
-  LinkedList **grid;
-  int start_idx;
-  int end_idx;
-  int stride;
-  volatile long npairs;
-} counter_args;
 
 typedef struct parser_state {
   int nthreads;
@@ -57,8 +51,13 @@ typedef struct parser_state {
 typedef struct counter_state {
   int nthreads;
   pthread_t *threads;
-  counter_args *threads_args;
+  LinkedList **grid;
+  volatile int next_index;
+  int end_idx;
+  int chunk_size;
+  atomic_long npairs;
   volatile atomic_int n_running;
+  volatile int has_started;
 } counter_state;
 
 parser_state pstate = {
@@ -74,8 +73,13 @@ parser_state pstate = {
 counter_state cstate = {
   .nthreads = 4,
   .threads = NULL,
-  .threads_args = NULL,
+  .grid = NULL,
+  .next_index = INDEX(1,1,1),
+  .end_idx = INDEX(NBB-1, NBB-1, NBB-1),
+  .chunk_size = 512,
+  .npairs = 0,
   .n_running = 0,
+  .has_started = 0,
 };
 
 void usage(char **argv){
@@ -246,84 +250,75 @@ int compare(float *pt, LinkedList *head){
   return count;
 }
 
-void *counter_thread(void *__cargs){
-  counter_args *cargs = (counter_args *)__cargs;
-  LinkedList **grid = cargs->grid;
-  int sidx = cargs->start_idx;
-  int eidx = cargs->end_idx;
-  int stride = cargs->stride;
+void *counter_thread(){
+  cstate.n_running++;
+  cstate.has_started++;
+  LinkedList **grid = cstate.grid;
+  int chunk_size = cstate.chunk_size;
+  volatile int *next_idx_ptr = &cstate.next_index;
+  int end_idx = cstate.end_idx;
+  int sidx, eidx;
   long npairs = 0;
 
-  for (int i=sidx; i<eidx; i+=stride){
-    for (int j=0; j<NBB; j+=1){
-      for (int k=0; k<NBB; k+=1){
-        LinkedList *head = grid[INDEX(i,j,k)];
-        while (head!=NULL){
-          int used = head->used;
-          for (int n=0; n<used; n++){
-            float *cur = &head->pt[n*4];
-            // Compare point with points after it in current chunk
-            for (int m=n+1; m<used; m++){
-              if (dist2(cur, &head->pt[m*4])<=0.0025){
-                npairs++;
-              }
+  // Fetch an interval of chunk_size and iterate through the grid entries
+  while ((sidx = __atomic_fetch_add(next_idx_ptr, chunk_size, __ATOMIC_RELAXED))){
+    eidx = MIN(sidx+chunk_size, end_idx);
+    for (int idx=sidx; idx<eidx; idx++){
+      LinkedList *head = grid[idx];
+      while (head!=NULL){
+        int used = head->used;
+        for (int n=0; n<used; n++){
+          float *cur = &head->pt[n*4];
+          // Compare point with points after it in current chunk
+          for (int m=n+1; m<used; m++){
+            if (dist2(cur, &head->pt[m * 4]) <= 0.0025) {
+              npairs++;
             }
-            // Compare with following chunks in the same cell
-            npairs += compare(cur, head->next);
-
-            // Check neighbouring cells
-            npairs += compare(cur, grid[INDEX(i+1, j, k)]);
-            npairs += compare(cur, grid[INDEX(i+1, j+1, k)]);
-            npairs += compare(cur, grid[INDEX(i+1, j+1, k+1)]);
-            npairs += compare(cur, grid[INDEX(i+1, j+1, k-1)]);
-            npairs += compare(cur, grid[INDEX(i+1, j-1, k)]);
-            npairs += compare(cur, grid[INDEX(i+1, j-1, k+1)]);
-            npairs += compare(cur, grid[INDEX(i+1, j-1, k-1)]);
-            npairs += compare(cur, grid[INDEX(i+1, j, k-1)]);
-            npairs += compare(cur, grid[INDEX(i+1, j, k+1)]);
-            npairs += compare(cur, grid[INDEX(i, j+1, k)]);
-            npairs += compare(cur, grid[INDEX(i, j+1, k+1)]);
-            npairs += compare(cur, grid[INDEX(i, j+1, k-1)]);
-            npairs += compare(cur, grid[INDEX(i, j, k+1)]);
           }
-          head = head->next;
+          // Compare with following chunks in the same cell
+          npairs += compare(cur, head->next);
+
+          // Check neighbouring cells
+          npairs += compare(cur, grid[idx + INDEX(1,  0,  0)]);
+          npairs += compare(cur, grid[idx + INDEX(1,  1,  0)]);
+          npairs += compare(cur, grid[idx + INDEX(1,  1,  1)]);
+          npairs += compare(cur, grid[idx + INDEX(1,  1, -1)]);
+          npairs += compare(cur, grid[idx + INDEX(1, -1,  0)]);
+          npairs += compare(cur, grid[idx + INDEX(1, -1,  1)]);
+          npairs += compare(cur, grid[idx + INDEX(1, -1, -1)]);
+          npairs += compare(cur, grid[idx + INDEX(1,  0, -1)]);
+          npairs += compare(cur, grid[idx + INDEX(1,  0,  1)]);
+          npairs += compare(cur, grid[idx + INDEX(0,  1,  0)]);
+          npairs += compare(cur, grid[idx + INDEX(0,  1,  1)]);
+          npairs += compare(cur, grid[idx + INDEX(0,  1, -1)]);
+          npairs += compare(cur, grid[idx + INDEX(0,  0,  1)]);
         }
+        head = head->next;
       }
     }
+    if (eidx >= end_idx){
+      break;
+    }
   }
-  cargs->npairs = npairs;
+  cstate.npairs += npairs;
+  cstate.n_running--;
   return NULL;
 }
 
 long count(LinkedList **grid){
   const int nthreads = cstate.nthreads;
   cstate.threads = malloc(nthreads*sizeof(pthread_t));
-  cstate.threads_args = malloc(nthreads*sizeof(counter_args));
-  for (int i=0; i<nthreads; i++){
-    cstate.threads_args[i].grid = grid;
-    cstate.threads_args[i].start_idx = i;
-    cstate.threads_args[i].end_idx = NBB;
-    cstate.threads_args[i].stride = nthreads;
-  }
+  cstate.grid = grid;
   // Create threads
   for (int i=0; i<nthreads; i++){
-    if (0 != pthread_create(&cstate.threads[i], NULL, &counter_thread, &cstate.threads_args[i])){
+    if (0 != pthread_create(&cstate.threads[i], NULL, &counter_thread, NULL)){
       perror("pthread_create");
       exit(-1);
     }
   }
-  long npairs = 0;
-  // Join threads
-  for (int i=0; i<nthreads; i++){
-    if (0 != pthread_join(cstate.threads[i], NULL)){
-      perror("pthread_join");
-      exit(-1);
-    }
-    npairs += cstate.threads_args[i].npairs;
-  }
+  join_threads(nthreads, cstate.threads);
   free(cstate.threads);
-  free(cstate.threads_args);
-  return npairs;
+  return cstate.npairs;
 }
 
 int main(int argc, char **argv){
