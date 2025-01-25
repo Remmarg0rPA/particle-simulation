@@ -12,7 +12,6 @@ INLINE float parse_float(char *restrict str, char **restrict end);
 
 #endif // __PARSE_H
 
-#define PARSE_IMPLEMENTATION
 #ifdef PARSE_IMPLEMENTATION
 /*
   Parse a float with one integer digit, possibly with scientific notation.
