@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "util.h"
 
 #define PARSE_IMPLEMENTATION
 #include "parse.h"
@@ -18,11 +19,9 @@
 struct timeval stop, start;
 #define START_TIMER() gettimeofday(&start, NULL);
 #define STOP_TIMER(name) gettimeofday(&stop, NULL);printf("%16s:  %10lu us\n", name, (stop.tv_sec-start.tv_sec)*1000000 + stop.tv_usec-start.tv_usec);
-
 #else
 #define START_TIMER()
 #define STOP_TIMER(name)
-
 #endif
 
 #define BBSIZE 0.1
@@ -89,7 +88,7 @@ void usage(char **argv){
   puts("\t-h\tPrint this message and exit.");
 }
 
-static inline float dist2(float *pt1, float *pt2){
+INLINE float dist2(float *pt1, float *pt2){
   __m128 v1 = _mm_loadu_ps(pt1);
   __m128 v2 = _mm_loadu_ps(pt2);
   __m128 diff = v1-v2;
@@ -109,7 +108,7 @@ void join_threads(int nthreads, pthread_t *threads){
 /*
   Insert a new point into the grid using an atomic exchange operation.
 */
-static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
+INLINE void atomic_insert_new(float *pt, volatile LinkedList **grid){
   int x = (int)((pt[0] - (-10.))/BBSIZE);
   int y = (int)((pt[1] - (-10.))/BBSIZE);
   int z = (int)((pt[2] - (-10.))/BBSIZE);
@@ -160,7 +159,7 @@ static inline void atomic_insert_new(float *pt, volatile LinkedList **grid){
   Parses 3 floats.
   NOTE: Assumes that the first char is the start of the float
  */
-static inline char *parse_line(char *str, float *data) {
+INLINE char *parse_line(char *str, float *data) {
   char *end = NULL;
   #pragma GCC unroll 3
   for (int i=0; i<3; i++){

@@ -6,8 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <x86gprintrin.h>
+#include "util.h"
 
-static inline float parse_float(char *restrict str, char **restrict end);
+INLINE float parse_float(char *restrict str, char **restrict end);
 
 #endif // __PARSE_H
 
@@ -20,7 +21,7 @@ static inline float parse_float(char *restrict str, char **restrict end);
   The parser requires support for 64 bit integers and the `lzcnt` instruction.
   NOTE: Can only parse floats in the range (-10,10)
 */
-static inline float parse_float(char *restrict orig_str, char **restrict end){
+INLINE float parse_float(char *restrict orig_str, char **restrict end){
   bool sign = false;
   char *str = orig_str;
   if (*str == '-'){
@@ -73,11 +74,14 @@ static inline float parse_float(char *restrict orig_str, char **restrict end){
 
   // Count leading zeros in buf. Reinterpret as scientific notation.
   int leading_zs = 0;
-  for (size_t i=sign; i<max_digits; i++){
-    if (orig_str[i] != '0' && orig_str[i] != '.'){
+  // The first non zero digit in the number
+  int fst_nzd = 0;
+  for (int i=sign; i<ndecimals+1; i++){
+    if (orig_str[i] > '0'){
+      fst_nzd = orig_str[i]-'0';
       break;
     }
-    if (orig_str[i] != '.'){
+    if (orig_str[i] == '0'){
       leading_zs++;
     }
   }
@@ -88,8 +92,6 @@ static inline float parse_float(char *restrict orig_str, char **restrict end){
   uint32_t mantissa = 0;
   int LZCNT = 0;
   uint64_t tmp_mantissa = num;
-  int exp_adjustment = 0;
-  // Adjust for removing the decimal point, leading zeros and scientific notation
   for (int i=0; i<ndecimals; i++){
     if (i%16 == 0){
       // Shift mantissa to keep precision
@@ -107,14 +109,14 @@ static inline float parse_float(char *restrict orig_str, char **restrict end){
         LZCNT = _lzcnt_u64(tmp_mantissa);
         tmp_mantissa = tmp_mantissa << LZCNT;
         if (i != 0){
-          exp_adjustment -= LZCNT;
+          exp -= LZCNT;
         }
       }
       tmp_mantissa /= 5;
     }
-    exp_adjustment += -_lzcnt_u64(tmp_mantissa) + sci_exp;
+    exp += -_lzcnt_u64(tmp_mantissa) + sci_exp;
   } else if (sci_exp > 0){
-    // TODO: Handle exp_adjustment
+    // TODO: Handle adjustments to exp
     perror("sci_exp > 0");
     exit(-1);
     for (int i=0; i<sci_exp; i++){
@@ -125,16 +127,9 @@ static inline float parse_float(char *restrict orig_str, char **restrict end){
   // Shift mantissa to correct alignment
   LZCNT = _lzcnt_u64(tmp_mantissa);
   mantissa = (uint32_t)(tmp_mantissa >> (32+9-LZCNT-1));
-  // What exponent to chose depending on leading digit. 0 is handled separatlely, should never be accessed.
+  // What exponent to choose depending on leading digit. 0 should never be accessed.
   int8_t exps[10] = {0, 0, 1, 1, 2, 2, 2, 2, 3, 3};
-  // If there are leading zeros, add 1 to also skip decimal point
-  if (leading_zs)
-    exp = exps[orig_str[leading_zs+sign+1] - '0'];
-  else
-    exp = exps[orig_str[leading_zs+sign] - '0'];
-  if (sci_exp != 0){
-    exp += exp_adjustment;
-  }
+  exp += exps[fst_nzd];
 
 #define CREATE_SIGN_BIT_F32(sign) (((uint32_t)(sign))<<31)
 #define CREATE_EXPONENT_F32(exp) (((uint32_t)(((exp)+127)&0xFF))<<23)
