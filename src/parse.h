@@ -8,6 +8,7 @@
 #include <x86gprintrin.h>
 #include "util.h"
 
+INLINE char *parse_line(char *str, float *data);
 INLINE float parse_float(char *restrict str, char **restrict end);
 
 #endif // __PARSE_H
@@ -32,6 +33,7 @@ INLINE float parse_float(char *restrict orig_str, char **restrict end){
   str++;
   // Skip decimal point
   if (*str != '.'){
+    printf("%.32s\n", str);
     perror("*str != '.'");
     exit(-1);
   }
@@ -140,4 +142,23 @@ INLINE float parse_float(char *restrict orig_str, char **restrict end){
   return *fans;
 }
 
-#endif // __PARSE_IMPL
+
+/*
+  Parses 3 floats separated by a single space.
+  NOTE: Assumes that the first char is the start of the float
+ */
+INLINE char *parse_line(char *str, float *data){
+  char *end = NULL;
+  #pragma GCC unroll 3
+  for (int i=0; i<3; i++){
+    *data = parse_float(str, &end);
+    str = end+1;
+    data++;
+  }
+  // Skip nexline to get to beginning of the next line
+  while (*str<' ' && *str>'\0'){
+    str++;
+  }
+  return str;
+}
+#endif // PARSE_IMPLEMENTATION
