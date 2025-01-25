@@ -155,24 +155,6 @@ INLINE void atomic_insert_new(float *pt, volatile LinkedList **grid){
   cell->pt[(used-1)*4 + 2] = pt[2];
 }
 
-/*
-  Parses 3 floats.
-  NOTE: Assumes that the first char is the start of the float
- */
-INLINE char *parse_line(char *str, float *data) {
-  char *end = NULL;
-  #pragma GCC unroll 3
-  for (int i=0; i<3; i++){
-    *data = parse_float(str, &end);
-    str = end+1;
-    data++;
-  }
-  while (*str<' ' && *str>'\0'){
-    str++;
-  }
-  return str;
-}
-
 void *parser_thread(){
   // Increment the active threads count
   int ptid = __atomic_fetch_add(&pstate.has_started, 1, __ATOMIC_SEQ_CST);
