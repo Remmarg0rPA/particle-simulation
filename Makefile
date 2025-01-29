@@ -15,14 +15,14 @@ DEBUGFLAGS := -g -fsanitize=address -fsanitize=undefined
 CFLAGS += $(DEBUGFLAGS)
 LDFLAGS += $(DEBUGFLAGS)
 BUILD := $(BUILD)/debug
-else
-ifeq ($(PGO), 1)
+
+else ifeq ($(PGO), 1)
 # Add flags for generating code for profile guided optimization
 CFLAGS  += -fprofile-generate=$(BUILD)/pgo/data
 LDFLAGS += -fprofile-generate=$(BUILD)/pgo/data
 BUILD := $(BUILD)/pgo
-else
-ifeq ($(PGO), 2)
+
+else ifeq ($(PGO), 2)
 # Add flags to use data collected for profile guided optimization
 CFLAGS  += -fprofile-use=$(BUILD)/pgo/data
 LDFLAGS += -fprofile-use=$(BUILD)/pgo/data
