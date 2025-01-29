@@ -10,6 +10,9 @@
 #include <unistd.h>
 #include "util.h"
 
+#define HASHMAP_IMPLEMENTATION
+#include "hashmap.h"
+
 #define PARSE_IMPLEMENTATION
 #include "parse.h"
 
@@ -24,23 +27,14 @@ struct timeval stop, start;
 #define STOP_TIMER(name)
 #endif
 
-#define BBSIZE 0.1
+#define BBSIZE 0.05
 #define NBB (int)((10-(-10))/BBSIZE+1 + 2)
 #define INDEX(i,j,k) ((i)*NBB*NBB + (j)*NBB + (k))
-
-#define MIN(x,y) ((x)<(y)?(x):(y))
-
-#define CHUNK_SIZE 16
-typedef struct LinkedList {
-  float pt[4*CHUNK_SIZE];
-  struct LinkedList *next;
-  int used;
-} LinkedList;
 
 typedef struct parser_state {
   int nthreads;
   pthread_t *threads;
-  volatile LinkedList **grid;
+  volatile Hashmap *hmap;
   char *file;
   size_t file_size;
   volatile atomic_int n_running;
@@ -50,10 +44,10 @@ typedef struct parser_state {
 typedef struct counter_state {
   int nthreads;
   pthread_t *threads;
-  LinkedList **grid;
-  volatile int next_index;
-  int end_idx;
-  int chunk_size;
+  Hashmap *hmap;
+  uint64_t *keys;
+  volatile size_t keys_next_index;
+  size_t keys_len;
   atomic_long npairs;
   volatile atomic_int n_running;
   volatile int has_started;
@@ -62,7 +56,7 @@ typedef struct counter_state {
 parser_state pstate = {
   .nthreads = 4,
   .threads = NULL,
-  .grid = NULL,
+  .hmap = NULL,
   .file = NULL,
   .file_size = 0,
   .n_running = 0,
@@ -72,10 +66,10 @@ parser_state pstate = {
 counter_state cstate = {
   .nthreads = 4,
   .threads = NULL,
-  .grid = NULL,
-  .next_index = INDEX(1,1,1),
-  .end_idx = INDEX(NBB-1, NBB-1, NBB-1),
-  .chunk_size = 512,
+  .hmap = NULL,
+  .keys = NULL,
+  .keys_next_index = 0,
+  .keys_len = 0,
   .npairs = 0,
   .n_running = 0,
   .has_started = 0,
@@ -103,56 +97,6 @@ void join_threads(int nthreads, pthread_t *threads){
       exit(-1);
     }
   }
-}
-
-/*
-  Insert a new point into the grid using an atomic exchange operation.
-*/
-INLINE void atomic_insert_new(float *pt, volatile LinkedList **grid){
-  int x = (int)((pt[0] - (-10.))/BBSIZE);
-  int y = (int)((pt[1] - (-10.))/BBSIZE);
-  int z = (int)((pt[2] - (-10.))/BBSIZE);
-
-  // Create a new chunk in the cell. More than one chunk might be created by
-  // multiple threads trying to insert simultaneously. This does not affect
-  // the end result, but some chunks might not be full.
-  if (grid[INDEX(x,y,z)] == NULL){
-    LinkedList *node = calloc(1, sizeof(LinkedList));
-    if (node == NULL) {
-      perror("calloc");
-      exit(-1);
-    }
-    node->used = 1;
-    // Move address of node into the grid and the current address there into node->next
-    __atomic_exchange(&grid[INDEX(x,y,z)], (volatile LinkedList **)&node,
-                      (volatile LinkedList **)&node->next, __ATOMIC_RELEASE);
-    node->pt[0] = pt[0];
-    node->pt[1] = pt[1];
-    node->pt[2] = pt[2];
-    return;
-  }
-
-  volatile LinkedList *cell = __atomic_load_n(&grid[INDEX(x,y,z)], __ATOMIC_RELAXED);
-  int used = __atomic_add_fetch(&cell->used, 1, __ATOMIC_RELAXED);
-  // Thread filling last slot is responsible for creating a new chunk
-  if (used == CHUNK_SIZE){
-    LinkedList *node = calloc(1, sizeof(LinkedList));
-    if (node == NULL) {
-      perror("calloc");
-      exit(-1);
-    }
-    // Move address of node into the grid and the current address there into node->next
-    __atomic_exchange(&grid[INDEX(x,y,z)], (volatile LinkedList **)&node,
-                      (volatile LinkedList **)&node->next, __ATOMIC_RELAXED);
-  } else if (used > CHUNK_SIZE){
-    // Restore cell->used and loop back until a new chunk has been inserted
-    cell->used = CHUNK_SIZE;
-    atomic_insert_new(pt, grid);
-    return;
-  }
-  cell->pt[(used-1)*4 + 0] = pt[0];
-  cell->pt[(used-1)*4 + 1] = pt[1];
-  cell->pt[(used-1)*4 + 2] = pt[2];
 }
 
 void *parser_thread(){
@@ -184,23 +128,26 @@ void *parser_thread(){
     }
   }
   float data_buf[4];
-  volatile LinkedList **grid = pstate.grid;
+  volatile Hashmap *bt = pstate.hmap;
   while (str < file_end){
     str = parse_line(str, data_buf);
-    atomic_insert_new(data_buf, grid);
+    int x = (int)((data_buf[0] - (-10.))/BBSIZE);
+    int y = (int)((data_buf[1] - (-10.))/BBSIZE);
+    int z = (int)((data_buf[2] - (-10.))/BBSIZE);
+    insert((Hashmap *)bt, INDEX(x,y,z), data_buf);
   }
   pstate.n_running--;
   return NULL;
 }
 
-void start_parser(char *file, size_t size, LinkedList **grid){
+void start_parser(char *file, size_t size, Hashmap *hmap){
   const int nthreads = pstate.nthreads;
   pstate.threads = malloc(nthreads*sizeof(pthread_t));
   if (pstate.threads == NULL){
     perror("malloc");
     exit(-1);
   }
-  pstate.grid = (volatile LinkedList **)grid;
+  pstate.hmap = hmap;
   pstate.file = file;
   pstate.file_size = size;
   for (int i=0; i<nthreads; i++){
@@ -211,7 +158,7 @@ void start_parser(char *file, size_t size, LinkedList **grid){
   }
 }
 
-int count_chunk(float pt[4], LinkedList *chunk){
+INLINE int count_chunk(float pt[4], ChunkList *chunk){
   int count = 0;
   int used = chunk->used;
   for (int i=0; i<used; i++){
@@ -222,7 +169,7 @@ int count_chunk(float pt[4], LinkedList *chunk){
   return count;
 }
 
-int compare(float *pt, LinkedList *head){
+INLINE int compare(float *pt, ChunkList *head){
   int count = 0;
   while (head != NULL){
     count += count_chunk(pt, head);
@@ -234,51 +181,46 @@ int compare(float *pt, LinkedList *head){
 void *counter_thread(){
   cstate.n_running++;
   cstate.has_started++;
-  LinkedList **grid = cstate.grid;
-  int chunk_size = cstate.chunk_size;
-  volatile int *next_idx_ptr = &cstate.next_index;
-  int end_idx = cstate.end_idx;
-  int sidx, eidx;
+  Hashmap *hmap = cstate.hmap;
+  uint64_t *keys = cstate.keys;
+  volatile size_t *next_key_index = &cstate.keys_next_index;
+  size_t length = cstate.keys_len;
+  size_t idx;
   long npairs = 0;
 
   // Fetch an interval of chunk_size and iterate through the grid entries
-  while ((sidx = __atomic_fetch_add(next_idx_ptr, chunk_size, __ATOMIC_RELAXED))){
-    eidx = MIN(sidx+chunk_size, end_idx);
-    for (int idx=sidx; idx<eidx; idx++){
-      LinkedList *head = grid[idx];
-      while (head!=NULL){
-        int used = head->used;
-        for (int n=0; n<used; n++){
-          float *cur = &head->pt[n*4];
-          // Compare point with points after it in current chunk
-          for (int m=n+1; m<used; m++){
-            if (dist2(cur, &head->pt[m * 4]) <= 0.0025) {
-              npairs++;
-            }
+  while (length > (idx = __atomic_fetch_add(next_key_index, 1, __ATOMIC_RELAXED))){
+    // keys[idx] should always exist
+    ChunkList *head = find_key(hmap, keys[idx]);
+    while (head!=NULL){
+      int used = head->used;
+      for (int n=0; n<used; n++){
+        float *cur = &head->pt[n*4];
+        // Compare point with points after it in current chunk
+        for (int m=n+1; m<used; m++){
+          if (dist2(cur, &head->pt[m * 4]) <= 0.0025) {
+            npairs++;
           }
-          // Compare with following chunks in the same cell
-          npairs += compare(cur, head->next);
-
-          // Check neighbouring cells
-          npairs += compare(cur, grid[idx + INDEX(1,  0,  0)]);
-          npairs += compare(cur, grid[idx + INDEX(1,  1,  0)]);
-          npairs += compare(cur, grid[idx + INDEX(1,  1,  1)]);
-          npairs += compare(cur, grid[idx + INDEX(1,  1, -1)]);
-          npairs += compare(cur, grid[idx + INDEX(1, -1,  0)]);
-          npairs += compare(cur, grid[idx + INDEX(1, -1,  1)]);
-          npairs += compare(cur, grid[idx + INDEX(1, -1, -1)]);
-          npairs += compare(cur, grid[idx + INDEX(1,  0, -1)]);
-          npairs += compare(cur, grid[idx + INDEX(1,  0,  1)]);
-          npairs += compare(cur, grid[idx + INDEX(0,  1,  0)]);
-          npairs += compare(cur, grid[idx + INDEX(0,  1,  1)]);
-          npairs += compare(cur, grid[idx + INDEX(0,  1, -1)]);
-          npairs += compare(cur, grid[idx + INDEX(0,  0,  1)]);
         }
-        head = head->next;
+        // Compare with following chunks in the same cell
+        npairs += compare(cur, head->next);
+
+        // Check neighbouring cells
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  0,  0)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  1,  0)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  1,  1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  1, -1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1, -1,  0)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1, -1,  1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1, -1, -1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  0, -1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  0,  1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  1,  0)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  1,  1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  1, -1)));
+        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  0,  1)));
       }
-    }
-    if (eidx >= end_idx){
-      break;
+      head = head->next;
     }
   }
   cstate.npairs += npairs;
@@ -286,10 +228,12 @@ void *counter_thread(){
   return NULL;
 }
 
-long count(LinkedList **grid){
+long count(Hashmap *hmap, uint64_t *keys, size_t keys_len){
   const int nthreads = cstate.nthreads;
   cstate.threads = malloc(nthreads*sizeof(pthread_t));
-  cstate.grid = grid;
+  cstate.hmap = hmap;
+  cstate.keys = keys;
+  cstate.keys_len = keys_len;
   // Create threads
   for (int i=0; i<nthreads; i++){
     if (0 != pthread_create(&cstate.threads[i], NULL, &counter_thread, NULL)){
@@ -357,36 +301,35 @@ int main(int argc, char **argv){
     perror("fstat");
     return -1;
   }
-  long size = sb.st_size;
+  long file_size = sb.st_size;
 
-  char *file = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
+  char *file = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (file == MAP_FAILED){
     perror("mmap");
     return -1;
   }
-
-  #define GRID_SIZE (NBB+1)*(NBB+1)*(NBB+1)
-  LinkedList **grid = calloc(GRID_SIZE, sizeof(LinkedList *));
-  if (grid == NULL){
-    perror("calloc");
-    return -1;
-  }
+  Hashmap *hmap = malloc(sizeof(Hashmap));
+  init_hashmap(hmap, 0x8000);
   STOP_TIMER("init");
 
   START_TIMER();
-  start_parser(file, size, grid);
+  start_parser(file, file_size, hmap);
   join_threads(pstate.nthreads, pstate.threads);
+  hmap = (Hashmap *)pstate.hmap;
+  close(fd);
+  munmap(file, file_size);
   STOP_TIMER("parsing");
 
   START_TIMER();
-  long npairs = count(grid);
+  uint64_t *keys = NULL;
+  size_t size = 0;
+  flatten((Hashmap *)pstate.hmap, &keys, &size);
+  STOP_TIMER("flatten");
+
+  START_TIMER();
+  long npairs = count(hmap, keys, hmap->used);
   printf("%ld\n", npairs);
   STOP_TIMER("count");
 
-  START_TIMER();
-  close(fd);
-  munmap(file, size);
-  free(grid);
-  STOP_TIMER("cleanup");
   return 0;
 }
