@@ -45,7 +45,7 @@ INLINE uint64_t hash(struct Hashmap *hm, uint64_t key){
 void init_hashmap(struct Hashmap *hm, size_t capacity){
   hm->capacity = capacity;
   hm->used = 0;
-  hm->elems = (hm_elem **)calloc(capacity, sizeof(hm_elem));
+  hm->elems = (hm_elem **)calloc(capacity, sizeof(hm_elem *));
 }
 
 struct ChunkList *find_key(struct Hashmap *hm, uint64_t key){

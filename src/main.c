@@ -192,6 +192,21 @@ void *counter_thread(){
   while (length > (idx = __atomic_fetch_add(next_key_index, 1, __ATOMIC_RELAXED))){
     // keys[idx] should always exist
     ChunkList *head = find_key(hmap, keys[idx]);
+    ChunkList *neighbours[13] = {
+      find_key(hmap, keys[idx] + INDEX(1,  0,  0)),
+      find_key(hmap, keys[idx] + INDEX(1,  1,  0)),
+      find_key(hmap, keys[idx] + INDEX(1,  1,  1)),
+      find_key(hmap, keys[idx] + INDEX(1,  1, -1)),
+      find_key(hmap, keys[idx] + INDEX(1, -1,  0)),
+      find_key(hmap, keys[idx] + INDEX(1, -1,  1)),
+      find_key(hmap, keys[idx] + INDEX(1, -1, -1)),
+      find_key(hmap, keys[idx] + INDEX(1,  0, -1)),
+      find_key(hmap, keys[idx] + INDEX(1,  0,  1)),
+      find_key(hmap, keys[idx] + INDEX(0,  1,  0)),
+      find_key(hmap, keys[idx] + INDEX(0,  1,  1)),
+      find_key(hmap, keys[idx] + INDEX(0,  1, -1)),
+      find_key(hmap, keys[idx] + INDEX(0,  0,  1)),
+    };
     while (head!=NULL){
       int used = head->used;
       for (int n=0; n<used; n++){
@@ -206,19 +221,9 @@ void *counter_thread(){
         npairs += compare(cur, head->next);
 
         // Check neighbouring cells
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  0,  0)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  1,  0)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  1,  1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  1, -1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1, -1,  0)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1, -1,  1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1, -1, -1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  0, -1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(1,  0,  1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  1,  0)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  1,  1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  1, -1)));
-        npairs += compare(cur, find_key(hmap, keys[idx] + INDEX(0,  0,  1)));
+        for (int i=12; i>=0; i--){
+          npairs += compare(cur, neighbours[i]);
+        }
       }
       head = head->next;
     }
