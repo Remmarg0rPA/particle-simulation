@@ -161,7 +161,7 @@ void start_parser(char *file, size_t size, Hashmap *hmap){
 INLINE int count_chunk(float pt[4], ChunkList *chunk){
   int count = 0;
   int used = chunk->used;
-  for (int i=0; i<used; i++){
+  for (int i=used-1; i>=0; i--){
     if (dist2(pt, &chunk->pt[i*4])<=0.0025){
       count++;
     }
@@ -209,7 +209,7 @@ void *counter_thread(){
     };
     while (head!=NULL){
       int used = head->used;
-      for (int n=0; n<used; n++){
+      for (int n=used-1; n>=0; n--){
         float *cur = &head->pt[n*4];
         // Compare point with points after it in current chunk
         for (int m=n+1; m<used; m++){
@@ -314,7 +314,7 @@ int main(int argc, char **argv){
     return -1;
   }
   Hashmap *hmap = malloc(sizeof(Hashmap));
-  init_hashmap(hmap, 0x8000);
+  init_hashmap(hmap, file_size/128);
   STOP_TIMER("init");
 
   START_TIMER();

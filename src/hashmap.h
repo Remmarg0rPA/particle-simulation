@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include "util.h"
 
-#define CHUNK_SIZE 16
+#define CHUNK_SIZE 8
 typedef struct ChunkList {
   float pt[4*CHUNK_SIZE];
   struct ChunkList *next;
