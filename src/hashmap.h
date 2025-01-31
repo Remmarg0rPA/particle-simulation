@@ -39,7 +39,7 @@ void flatten(struct Hashmap *hm, uint64_t **keyarr, size_t *size);
 
 INLINE uint64_t hash(struct Hashmap *hm, uint64_t key){
   uint64_t mod = hm->capacity;
-  return (key % mod) ^ ((key>>16) % mod);
+  return (key ^ (key>>16)) % mod;
 }
 
 void init_hashmap(struct Hashmap *hm, size_t capacity){
